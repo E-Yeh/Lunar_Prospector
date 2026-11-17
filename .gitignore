@@ -1,0 +1,9 @@
+.data/
+__pycache__/
+.venv/
+.notebook_runtime/
+.ipynb_checkpoints/
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
