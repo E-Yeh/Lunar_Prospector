@@ -33,7 +33,6 @@ with st.sidebar:
     if st.session_state.data is not None:
         st.caption(f'{len(st.session_state.data):,} valid samples · 4 terrain groups')
 
-st.markdown('<div class="eyebrow">SELENE / EXPLORATORY INTELLIGENCE</div>',unsafe_allow_html=True)
 st.title('Find your next lunar lead.')
 st.caption('Compare titanium abundance and optical maturity. Build a shortlist for further investigation.')
 st.caption('Data sources: LROC WAC TiO₂ abundance and USGS Kaguya MI OMAT only.')
