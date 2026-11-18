@@ -32,6 +32,86 @@ Atomic downloads include source URL, resolved URL, byte count and a locally calc
 
 StandardScaler and KMeans use TiO2 and OMAT, k=4, n_init=10, seed 530. Terrain groups appear on Leafmap and in the candidate table. Balanced ranking is a separate heuristic: 65% TiO2 percentile and 35% inverse-OMAT percentile. Neither is a measured helium-3 concentration. WAC values below 2 wt% are below its detection limit. There are no slope, landing safety, other-element or economics layers.
 
+## Modeled relative solar-wind exposure
+
+MoonScout computes `solar_wind_exposure` at each valid raster sample using a
+**flat-surface geographic adaptation of Equation 4 in [Shukla et al. (2020)](https://doi.org/10.3390/rs12203350)**.
+This is a modeled, dimensionless monthly relative exposure index, not an
+observational dataset, measured particle flux, accumulated soil dose, or He-3 prediction.
+No OMNI downloads or additional dependencies are required.
+
+Let `lambda` be latitude in radians, `a = abs(wrapped east longitude)` in radians,
+and `f = 0.20` the assumed completely shielded fraction of a 29.53-day orbit
+(5.906 days). Longitude zero is the sub-Earth meridian. Define:
+
+```text
+G(a,f) = 2 + sin(a - pi*f) - sin(a + pi*f),  a <= pi*(0.5-f)
+       = 1 + sin(a - pi*f),                 pi*(0.5-f) < a < pi*(0.5+f)
+       = 2,                               a >= pi*(0.5+f)
+exposure = cos(lambda) * G(a,f) / 2
+```
+
+The constant incoming-flux and local-incidence factors cancel when normalized
+to the equatorial farside maximum. Unlike the paper's terrain-dependent model,
+this implementation assumes a spherical surface with a constant incidence factor,
+zero axial tilt, constant solar wind, and complete shielding during the chosen
+orbital fraction. `f=0.20` is a scenario from the paper's tested range, not a measured
+or fitted value. The function accepts `0 <= f <= 0.5` for sensitivity tests.
+
+Reference values with `f=0.20`: equatorial central nearside = approximately
+0.412215; equatorial farside = 1; 60-degree-latitude farside = 0.5. Larger values
+mean greater exposure under these assumptions. This is not the fraction of all
+incoming particles retained in soil. Terrain, local magnetic shielding, exposure
+age, retention, saturation, and historical solar-wind changes are not modeled.
+
+Select **Modeled solar-wind exposure** in Surface layer, or **exposure** in Rank by.
+The map uses a fixed 0–1 color scale. Try `highest solar wind exposure`, then
+`top 5`; current geographic and TiO2 constraints remain in effect. Measured flux,
+exposure thresholds, time-dependent requests, and He-3 estimates remain unsupported.
+The shortlist, marker popups, and explanations include the index. CSV exports
+include the model source, version, and shielding fraction; JSON provenance includes
+all assumptions separately from the downloaded raster receipts.
+
+K-means continues to use only TiO2 and OMAT. The 65/35 balanced score is unchanged;
+exposure ranking is an explicit alternative. The model is evaluated only at valid
+source samples and never substitutes for missing TiO2 or OMAT. Existing raster
+caches can be reused; the app resets old session data when loading this version.
+
+### Exact notebook change locations
+
+Cell numbers below are **1-based file order**, including Markdown cells, not execution counts.
+Existing cell IDs and order are preserved.
+
+| Cell | Stable cell ID | Change |
+| --- | --- | --- |
+| 2 | `804c2993` | Navigation note for analysis changes. |
+| 3 | `b2e65865` | Exposure configuration, provenance, commented `geographic_exposure` function; planner schema enum. |
+| 4 | `59643e57` | Attach modeled exposure after fitting the original terrain features. |
+| 5 | `c5b30403` | Validate the exposure ranking priority. |
+| 6 | `90139b91` | Planner instructions distinguish relative modeled exposure from unavailable measurements. |
+| 7 | `d74c716c` | Descending exposure ranking with existing filters and stable tie-breaking. |
+| 8 | `f2835424` | Grounded result explanation includes exposure and its qualification. |
+| 14 | `11d04713` | Navigation note for interface changes. |
+| 15 | `dec08d5e` | Map, controls, shortlist, popups, exports, session migration, and Methods documentation. |
+| 17 | `d079472d` | Imports for model tests. |
+| 18 | `3d403ed8` | Model tests and real-source UI integration checks. |
+
+Exporting also updates `core.py`, `app.py`, and `test_app.py`; `rasters.py` is unchanged.
+The generated files are required for Streamlit Cloud deployment.
+
+Run the offline model and mocked-planner checks after exporting:
+
+```text
+python run_notebooks.py --check
+python -m unittest -v test_app.GeographicExposureTests test_app.OpenAIPlannerTests
+```
+
+The model tests cover reference values, longitude wrapping, hemispheric symmetry,
+branch continuity, invalid inputs, range, shielding sensitivity, and an independent
+numerical orbital integration. Full `python -m unittest -v` also exercises the app
+against publisher rasters and can download about 1.2 GB on first use. These checks
+verify the implementation, not empirical accuracy of exposure or He-3 predictions.
+
 ## Queries
 
 Try `highest TiO2`, then `top 5`. Region and ranking controls adjust the retrieved candidates. Export the shortlist and provenance from Explore. Methods & project explains the workflow and shows source receipts.

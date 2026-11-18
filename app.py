@@ -10,17 +10,17 @@ import numpy as np
 import streamlit as st
 import leafmap.foliumap as leafmap
 import folium
-from core import DEFAULT, fit_terrain, plan_query, rank_sites, explain, OPENAI_API_KEY, OPENAI_MODEL
+from core import DEFAULT, fit_terrain, plan_query, rank_sites, explain, OPENAI_API_KEY, OPENAI_MODEL, EXPOSURE_MODEL
 from rasters import load_sources, SOURCE_PAGES
 
 # Configure the browser page and inject the interface's compact visual styling.
 st.set_page_config(page_title='MoonScout | Lunar prospecting', page_icon='🌘', layout='wide')
 st.markdown('''<style>.block-container{padding-top:2rem}h1{letter-spacing:-1.8px} div[data-testid="stMetric"]{background:#151e2d;padding:12px;border-radius:12px} div[data-testid="stMetricValue"]{font-size:1.4rem} .eyebrow{color:#76e0c5;letter-spacing:3px;font-size:12px}</style>''',unsafe_allow_html=True)
 
-# Invalidate old sessions, including data and messages from the removed demo mode.
-if st.session_state.get('data_policy_version') != 3:
+# Invalidate old sessions so cached fitted tables gain the new exposure column.
+if st.session_state.get('data_policy_version') != 4:
     st.session_state.clear()
-    st.session_state.update(data_policy_version=3, data=None, silhouette=None, provenance=[], plan=dict(DEFAULT), history=[])
+    st.session_state.update(data_policy_version=4, data=None, silhouette=None, provenance=[], plan=dict(DEFAULT), history=[])
 
 # Read server configuration without displaying or storing credentials in chat.
 # Streamlit secrets take precedence over environment variables and code defaults.
@@ -51,8 +51,8 @@ with st.sidebar:
 
 # Display the shared title and approved-source description on both pages.
 st.title('Find your next lunar lead.')
-st.caption('Compare titanium abundance and optical maturity. Build a shortlist for further investigation.')
-st.caption('Data sources: LROC WAC TiO₂ abundance and USGS Kaguya MI OMAT only.')
+st.caption('Compare titanium abundance, optical maturity, and modeled solar-wind exposure. Build a shortlist for further investigation.')
+st.caption('Measured-source layers: LROC WAC TiO₂ and USGS Kaguya MI OMAT. Solar-wind exposure is a geographic model.')
 
 # Explore loads real source data once per session, fits terrain groups,
 # and stores data, silhouette, and provenance for later reruns.
@@ -85,7 +85,7 @@ if page == 'Explore':
             cols=st.columns(3)
             values['minimum_tio2']=cols[0].number_input('Minimum TiO₂ (wt%)',0.,15.,float(plan['minimum_tio2']))
             values['top_n']=cols[1].number_input('Candidates',1,50,int(plan['top_n']))
-            values['priority']=cols[2].selectbox('Rank by',['balanced','tio2','maturity'],index=['balanced','tio2','maturity'].index(plan['priority']))
+            values['priority']=cols[2].selectbox('Rank by',['balanced','tio2','maturity','exposure'],index=['balanced','tio2','maturity','exposure'].index(plan['priority']))
             if st.form_submit_button('Apply constraints'):
                 from core import validate_plan
                 try:
@@ -99,7 +99,7 @@ if page == 'Explore':
     left,right=st.columns([.85,1.65],gap='large')
     with left:
         st.subheader('01 / Ask & refine')
-        st.caption('Try “highest TiO2”, then “top 5”. Follow-ups retain the current region and filters.')
+        st.caption('Try “highest TiO2”, “highest solar wind exposure”, then “top 5”. Follow-ups retain the current region and filters.')
         with st.form('question',clear_on_submit=True):
             question=st.text_area('Prospecting question',placeholder='Find the best spots',height=105)
             run=st.form_submit_button('Find candidates',type='primary', disabled=not api_key)
@@ -133,7 +133,7 @@ if page == 'Explore':
             st.json(st.session_state.plan)
     
     # Recompute the shortlist from current constraints and define summary metrics
-    # and the selected display field (TiO2, OMAT, or cluster ID).
+    # and the selected display field (TiO2, OMAT, cluster ID, or modeled exposure).
     with right:
         result=rank_sites(st.session_state.data,st.session_state.plan)
         st.subheader('02 / Survey the candidates')
@@ -141,7 +141,7 @@ if page == 'Explore':
         a.metric('Shortlisted',len(result))
         b.metric('Top TiO₂',f'{result.tio2.max():.2f} wt%' if len(result) else '—')
         c.metric('Terrain groups',result.cluster.nunique())
-        layer=st.selectbox('Surface layer',['TiO₂ abundance','Optical maturity','Terrain groups'])
+        layer=st.selectbox('Surface layer',['TiO₂ abundance','Optical maturity','Terrain groups','Modeled solar-wind exposure'])
         
         # Simple CRS maps lunar longitude/latitude directly; Earth distance tools are disabled.
         m=leafmap.Map(center=[0,0],zoom=1,tiles=None,crs='Simple',draw_control=False,
@@ -156,7 +156,7 @@ if page == 'Explore':
         # The surface preview uses all samples inside the geographic bounds, while
         # the shortlist also applies the minimum TiO2 and candidate-count filters.
         region=data[data.longitude.between(st.session_state.plan['west'],st.session_state.plan['east']) & data.latitude.between(st.session_state.plan['south'],st.session_state.plan['north'])]
-        field={'TiO₂ abundance':'tio2','Optical maturity':'omat','Terrain groups':'cluster'}[layer]
+        field={'TiO₂ abundance':'tio2','Optical maturity':'omat','Terrain groups':'cluster','Modeled solar-wind exposure':'solar_wind_exposure'}[layer]
         
         # Define categorical cluster colors; continuous layers use a separate ramp.
         colors=['#70e1c4','#f5b86b','#9898f0','#eb83ae']
@@ -180,6 +180,10 @@ if page == 'Explore':
                 # Scale continuous colors to the visible region's min/max; cluster colors
                 # use discrete IDs. The fallback denominator handles a constant-valued region.
                 low,high=region[field].astype(float).min(),region[field].astype(float).max()
+                # Exposure uses the global 0..1 reference so colors remain comparable
+                # across regions; measured layers retain their existing local scaling.
+                if field == 'solar_wind_exposure':
+                    low, high = 0., 1.
                 for row in region.itertuples():
                     value=float(getattr(row,field)); t=(value-low)/(high-low or 1)
                     color=colors[int(row.cluster)] if field=='cluster' else None
@@ -193,23 +197,25 @@ if page == 'Explore':
         # Add numbered shortlist markers with exact coordinates, proxy values,
         # and terrain labels, then frame the map using the selected bounds.
         for rank,row in enumerate(result.itertuples(),1):
-            popup=f'#{rank} · {row.site_id}<br>{row.latitude:.2f}°N, {row.longitude:.2f}°E<br>TiO₂ {row.tio2:.2f} wt%<br>OMAT {row.omat:.3f}<br>Terrain {row.cluster}'
+            popup=f'#{rank} · {row.site_id}<br>{row.latitude:.2f}°N, {row.longitude:.2f}°E<br>TiO₂ {row.tio2:.2f} wt%<br>OMAT {row.omat:.3f}<br>Modeled exposure {row.solar_wind_exposure:.3f} (0–1)<br>Terrain {row.cluster}'
             folium.Marker([row.latitude,row.longitude],tooltip=f'#{rank} {row.site_id}',popup=popup,
                 icon=folium.DivIcon(html=f'<div style="background:#76e0c5;color:#101722;border:2px solid white;border-radius:50%;width:25px;height:25px;text-align:center;font-weight:bold">{rank}</div>')).add_to(m)
         p=st.session_state.plan
         m.fit_bounds([[p['south'],p['west']],[p['north'],p['east']]])
         m.to_streamlit(height=410)
         st.caption('Lunar longitude/latitude · sampled raster preview, not full-resolution imagery. Continuous layers: dark = low, gold = high. Terrain groups: mint 0 · gold 1 · violet 2 · pink 3.')
-        if len(region) and field!='cluster':
+        if field == 'solar_wind_exposure':
+            st.caption('Modeled relative exposure: fixed 0–1 color scale; 1 = equatorial farside reference. Shielded orbit fraction f=0.20. No measured particle flux, terrain correction, or He-3 estimate.')
+        elif len(region) and field!='cluster':
             st.caption(f'Visible color range: {region[field].min():.3f} to {region[field].max():.3f} '+('wt%' if field=='tio2' else 'OMAT'))
         
         # Show an explicit empty-result message or offer the ranked table, CSV
         # with source links, and JSON containing the query and provenance.
         if result.empty: st.info(explain(result,p))
         else:
-            st.dataframe(result[['site_id','latitude','longitude','tio2','omat','cluster','score']].round(3),hide_index=True,width='stretch')
-            st.download_button('Download shortlist (CSV)',result.assign(tio2_source=SOURCE_PAGES['tio2'],omat_source=SOURCE_PAGES['omat']).to_csv(index=False),'lunar-shortlist.csv','text/csv')
-            st.download_button('Download query & provenance',json.dumps({'plan':p,'provenance':st.session_state.provenance},indent=2,default=str),'provenance.json','application/json')
+            st.dataframe(result[['site_id','latitude','longitude','tio2','omat','solar_wind_exposure','cluster','score']].round(3),hide_index=True,width='stretch')
+            st.download_button('Download shortlist (CSV)',result.assign(tio2_source=SOURCE_PAGES['tio2'],omat_source=SOURCE_PAGES['omat'],exposure_model_source=EXPOSURE_MODEL['source'],exposure_model_version=EXPOSURE_MODEL['version'],exposure_shielded_fraction=EXPOSURE_MODEL['shielded_fraction']).to_csv(index=False),'lunar-shortlist.csv','text/csv')
+            st.download_button('Download query & provenance',json.dumps({'plan':p,'provenance':st.session_state.provenance,'exposure_model':EXPOSURE_MODEL},indent=2,default=str),'provenance.json','application/json')
 
 # The Methods page explains the pipeline, cluster diagnostics, heuristic
 # ranking, source limitations, provenance, and local-model setup.
@@ -230,6 +236,13 @@ else:
     st.markdown('### Ranking and limitations')
     st.write('Balanced score = 100 × (0.65 × TiO₂ percentile + 0.35 × inverse-OMAT percentile) within the loaded source dataset. This is an explicit exploratory heuristic, not a trained helium-3 model. Lower OMAT is treated as greater optical maturity, not a direct solar-wind exposure measurement. Pure TiO₂ and maturity rankings are also available. No helium-3 ground truth, slope, landing safety, other elements, extraction economics or direct solar-wind data are included.')
     st.write('WAC abundance values below 2 wt% are below the product detection limit; values above 15 wt% are excluded. OMAT outside 0–1 is excluded as a prototype quality check. Verify product-specific calibration and masks. Grid sampling can miss small high-value regions; nearby shortlist rows are not independent deposits.')
+    # Keep model provenance distinct from receipts for downloaded measurements.
+    st.markdown('### Modeled relative solar-wind exposure')
+    st.write('Flat-surface adaptation of Shukla et al. (2020), Eq. 4: integrate geographic incidence outside an assumed fully shielded 20% of the lunar orbit, then normalize to the equatorial farside maximum. Longitude 0° is the sub-Earth meridian. Values are dimensionless, not measured flux, accumulated dose, or helium-3 concentration. No OMNI data, terrain correction, local magnetic shielding, soil age, retention, or saturation is included.')
+    st.write('Select exposure ranking to sort by this index. Balanced ranking and TiO₂/OMAT K-means are unchanged; the model does not fill missing raster measurements. CSV and JSON exports record the model source and shielding assumption.')
+    st.markdown('[Model reference: Shukla et al. (2020), Eq. 4](https://doi.org/10.3390/rs12203350)')
+    with st.expander('Exposure model assumptions & provenance'):
+        st.json(EXPOSURE_MODEL)
     st.markdown('### Product decisions')
     st.write('1. Keep conversation beside the map and table, matching the scoping sketch. Explicit region controls and a visible parsed plan make constraints inspectable.\n\n2. Load only fixed publisher sources and cache successful downloads: source failures show an error instead of substitute data. The workflow stops on unsupported questions instead of silently dropping constraints. These are implementation decisions; user testing remains to be conducted.')
     with st.expander('Loaded source provenance'):
