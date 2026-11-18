@@ -1,6 +1,9 @@
 # GENERATED FROM MoonScout.ipynb. Edit the notebook, not this file.
 # MoonScout.ipynb cell 15
 # export: app.py
+
+# This cell defines the Streamlit page at module scope: Streamlit reruns it
+# on interaction, while session_state preserves loaded data and user settings.
 import json
 import os
 import numpy as np
@@ -10,6 +13,7 @@ import folium
 from core import DEFAULT, fit_terrain, plan_query, rank_sites, explain
 from rasters import load_sources, SOURCE_PAGES
 
+# Configure the browser page and inject the interface's compact visual styling.
 st.set_page_config(page_title='MoonScout | Lunar prospecting', page_icon='🌘', layout='wide')
 st.markdown('''<style>.block-container{padding-top:2rem}h1{letter-spacing:-1.8px} div[data-testid="stMetric"]{background:#151e2d;padding:12px;border-radius:12px} div[data-testid="stMetricValue"]{font-size:1.4rem} .eyebrow{color:#76e0c5;letter-spacing:3px;font-size:12px}</style>''',unsafe_allow_html=True)
 
@@ -19,6 +23,8 @@ if st.session_state.get('data_policy_version') != 3:
     st.session_state.update(data_policy_version=3, data=None, silhouette=None,
                             provenance=[], plan=dict(DEFAULT), history=[])
 
+# Build navigation and optional local-LLM controls; page, use_llm, and model
+# record widget selections for the current run.
 with st.sidebar:
     st.markdown('### 🌘 MoonScout')
     st.caption('LUNAR PROSPECTING WORKSPACE')
@@ -33,10 +39,14 @@ with st.sidebar:
     if st.session_state.data is not None:
         st.caption(f'{len(st.session_state.data):,} valid samples · 4 terrain groups')
 
+# Display the shared title and approved-source description on both pages.
+st.markdown('<div class="eyebrow">MoonScout / EXPLORATORY INTELLIGENCE</div>',unsafe_allow_html=True)
 st.title('Find your next lunar lead.')
 st.caption('Compare titanium abundance and optical maturity. Build a shortlist for further investigation.')
 st.caption('Data sources: LROC WAC TiO₂ abundance and USGS Kaguya MI OMAT only.')
 
+# Explore loads real source data once per session, fits terrain groups,
+# and stores data, silhouette, and provenance for later reruns.
 if page == 'Explore':
     if st.session_state.data is None:
         try:
@@ -46,6 +56,8 @@ if page == 'Explore':
                 st.session_state.update(data=clustered, silhouette=silhouette, provenance=provenance)
                 status.update(label='Source datasets loaded', state='complete', expanded=False)
             st.rerun()
+        
+        # A loading failure stops the page and offers retry; no substitute data is used.
         except Exception as error:
             st.error(f'The approved source datasets could not be loaded: {error}')
             st.info('No substitute data is used. Check the server connection and retry.')
@@ -53,6 +65,9 @@ if page == 'Explore':
                 st.rerun()
             st.stop()
     st.caption('Automatically loaded • LROC scientific abundance tiles + USGS OMAT 4 ppd overview • 2° sampling grid')
+    
+    # Read the current plan, then collect region and ranking edits in a form
+    # so they are validated and applied together on submission.
     plan=st.session_state.plan
     with st.expander('Region & ranking controls',expanded=False):
         with st.form('controls'):
@@ -69,6 +84,9 @@ if page == 'Explore':
                     st.rerun()
                 except ValueError as error:
                     st.error(str(error))
+    
+    # Place question controls/history in the left column and the map/table
+    # in the right column; all views share the current session plan.
     left,right=st.columns([.85,1.65],gap='large')
     with left:
         st.subheader('01 / Ask & refine')
@@ -76,6 +94,9 @@ if page == 'Explore':
         with st.form('question',clear_on_submit=True):
             question=st.text_area('Prospecting question',placeholder='Find the best spots',height=105)
             run=st.form_submit_button('Find candidates',type='primary')
+        
+        # On submission, parse and validate the question, rank real samples, and
+        # create a grounded summary before committing the new plan and conversation.
         if run:
             try:
                 with st.spinner('Plan → validate → retrieve → rank → explain'):
@@ -86,6 +107,8 @@ if page == 'Explore':
                 st.session_state.history.append((question,response,'Ollama' if use_llm else 'Offline parser'))
             except Exception as error:
                 st.error(f'Query stopped; previous results retained. {error}')
+        
+        # Show the four most recent exchanges and identify which query engine ran.
         for question,response,engine in st.session_state.history[-4:]:
             with st.chat_message('user'): st.write(question)
             with st.chat_message('assistant'):
@@ -94,9 +117,14 @@ if page == 'Explore':
         if st.button('Clear conversation'):
             st.session_state.history=[]
             st.rerun()
+        
+        # Expose the processing steps and exact current plan for inspection.
         with st.expander('Workflow trace'):
             st.write('1. Parse request into a constrained plan.\n2. Validate bounds and available fields.\n3. Retrieve matching samples.\n4. Rank by proxies and attach fitted terrain groups.\n5. Explain using exact retrieved values.')
             st.json(st.session_state.plan)
+    
+    # Recompute the shortlist from current constraints and define summary metrics
+    # and the selected display field (TiO2, OMAT, or cluster ID).
     with right:
         result=rank_sites(st.session_state.data,st.session_state.plan)
         st.subheader('02 / Survey the candidates')
@@ -105,33 +133,56 @@ if page == 'Explore':
         b.metric('Top TiO₂',f'{result.tio2.max():.2f} wt%' if len(result) else '—')
         c.metric('Terrain groups',result.cluster.nunique())
         layer=st.selectbox('Surface layer',['TiO₂ abundance','Optical maturity','Terrain groups'])
+        
         # Simple CRS maps lunar longitude/latitude directly; Earth distance tools are disabled.
         m=leafmap.Map(center=[0,0],zoom=1,tiles=None,crs='Simple',draw_control=False,
                       measure_control=False,fullscreen_control=True,latlon_control=False,
                       search_control=False,scale_control=False)
+        
+        # Remove any default Earth tile layers that the map constructor may add.
         for key in list(m._children):
             if isinstance(m._children[key],folium.raster_layers.TileLayer): del m._children[key]
         data=st.session_state.data
+        
+        # The surface preview uses all samples inside the geographic bounds, while
+        # the shortlist also applies the minimum TiO2 and candidate-count filters.
         region=data[data.longitude.between(st.session_state.plan['west'],st.session_state.plan['east']) & data.latitude.between(st.session_state.plan['south'],st.session_state.plan['north'])]
         field={'TiO₂ abundance':'tio2','Optical maturity':'omat','Terrain groups':'cluster'}[layer]
+        
+        # Define categorical cluster colors; continuous layers use a separate ramp.
         colors=['#70e1c4','#f5b86b','#9898f0','#eb83ae']
+        
         # Reconstruct the imported regular grid as a small RGBA raster overlay.
         if len(region):
             p=st.session_state.plan
+            
+            # Recover and crop grid axes, ordering latitude north-to-south to match
+            # the image overlay's upper origin.
             xs=np.sort(np.asarray(data.attrs.get('grid_longitudes',data.longitude.unique())))
             ys=np.sort(np.asarray(data.attrs.get('grid_latitudes',data.latitude.unique())))[::-1]
             xs=xs[(xs>=p['west'])&(xs<=p['east'])]; ys=ys[(ys>=p['south'])&(ys<=p['north'])]
             if len(xs)>1 and len(ys)>1:
+                
+                # Initialize transparent RGBA cells; unobserved locations stay transparent.
+                # Coordinate-to-index dictionaries place each real sample in its grid cell.
                 grid=np.zeros((len(ys),len(xs),4),dtype=np.uint8)
                 xidx={x:i for i,x in enumerate(xs)}; yidx={y:i for i,y in enumerate(ys)}
+                
+                # Scale continuous colors to the visible region's min/max; cluster colors
+                # use discrete IDs. The fallback denominator handles a constant-valued region.
                 low,high=region[field].astype(float).min(),region[field].astype(float).max()
                 for row in region.itertuples():
                     value=float(getattr(row,field)); t=(value-low)/(high-low or 1)
                     color=colors[int(row.cluster)] if field=='cluster' else None
                     rgb=[int(color[i:i+2],16) for i in (1,3,5)] if color else [int(35+210*t),int(65+130*t),int(90+30*t)]
                     grid[yidx[row.latitude],xidx[row.longitude]]=[*rgb,210]
+                
+                # Extend overlay bounds by half a grid spacing so samples sit at cell centers.
                 dx=(xs[1]-xs[0])/2; dy=abs(ys[1]-ys[0])/2
                 folium.raster_layers.ImageOverlay(grid,bounds=[[ys[-1]-dy,xs[0]-dx],[ys[0]+dy,xs[-1]+dx]],name=layer,origin='upper').add_to(m)
+        
+        # Add numbered shortlist markers with exact coordinates, proxy values,
+        # and terrain labels, then frame the map using the selected bounds.
         for rank,row in enumerate(result.itertuples(),1):
             popup=f'#{rank} · {row.site_id}<br>{row.latitude:.2f}°N, {row.longitude:.2f}°E<br>TiO₂ {row.tio2:.2f} wt%<br>OMAT {row.omat:.3f}<br>Terrain {row.cluster}'
             folium.Marker([row.latitude,row.longitude],tooltip=f'#{rank} {row.site_id}',popup=popup,
@@ -142,12 +193,17 @@ if page == 'Explore':
         st.caption('Lunar longitude/latitude · sampled raster preview, not full-resolution imagery. Continuous layers: dark = low, gold = high. Terrain groups: mint 0 · gold 1 · violet 2 · pink 3.')
         if len(region) and field!='cluster':
             st.caption(f'Visible color range: {region[field].min():.3f} to {region[field].max():.3f} '+('wt%' if field=='tio2' else 'OMAT'))
+        
+        # Show an explicit empty-result message or offer the ranked table, CSV
+        # with source links, and JSON containing the query and provenance.
         if result.empty: st.info(explain(result,p))
         else:
             st.dataframe(result[['site_id','latitude','longitude','tio2','omat','cluster','score']].round(3),hide_index=True,width='stretch')
             st.download_button('Download shortlist (CSV)',result.assign(tio2_source=SOURCE_PAGES['tio2'],omat_source=SOURCE_PAGES['omat']).to_csv(index=False),'lunar-shortlist.csv','text/csv')
             st.download_button('Download query & provenance',json.dumps({'plan':p,'provenance':st.session_state.provenance},indent=2,default=str),'provenance.json','application/json')
 
+# The Methods page explains the pipeline, cluster diagnostics, heuristic
+# ranking, source limitations, provenance, and local-model setup.
 else:
     st.subheader('A prospecting aid, with evidence in view')
     st.write('Designed for exploratory analysts comparing potential lunar prospecting regions. A successful interaction produces a traceable shortlist, not a mining or landing authorization.')
@@ -169,8 +225,7 @@ else:
     st.write('1. Keep conversation beside the map and table, matching the scoping sketch. Explicit region controls and a visible parsed plan make constraints inspectable.\n\n2. Load only fixed publisher sources and cache successful downloads: source failures show an error instead of substitute data. The workflow stops on unsupported questions instead of silently dropping constraints. These are implementation decisions; user testing remains to be conducted.')
     with st.expander('Loaded source provenance'):
         st.json(st.session_state.provenance)
-    st.caption('OMAT uses the publisher-provided 4 ppd scientific overview of the linked 512 ppd product. The map samples every 2 degrees and cannot identify local maxima at full raster resolution. Credit: JAXA/SELENE; Lemelin et al. (2016).')
+    st.caption('OMAT uses the publisher-provided 4 ppd scientific overview of the linked 512 ppd product. The map samples every 2 degrees and cannot identify local maxima at full raster resolution. Credit: JAXA/MoonScout; Lemelin et al. (2016).')
     st.markdown('### Sources & setup')
     st.markdown('- [LROC WAC TiO₂ product and calibration](https://data.lroc.im-ldi.com/lroc/view_rdr/WAC_TIO2)\n- [USGS Kaguya OMAT product](https://astrogeology.usgs.gov/search/map/kaguya_lunar_multiband_imager_mi_derived_optical_maturity_omat_50n50s_512ppd_59mpp)\n- [Leafmap Streamlit integration](https://leafmap.org/foliumap/)\n- [Ollama chat API](https://docs.ollama.com/api/chat)')
     st.info('LLM integration is implemented but requires a running Ollama model. Offline mode is not an LLM. A recorded walkthrough, representative LLM benchmark and real-product calibration validation remain follow-up work.')
-

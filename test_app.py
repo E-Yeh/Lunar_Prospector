@@ -1,22 +1,30 @@
 # GENERATED FROM MoonScout.ipynb. Edit the notebook, not this file.
 # MoonScout.ipynb cell 17
 # export: test_app.py
-"""Tests use publisher data or a network failure, never generated measurements."""
+
+# Import unittest assertions, failure simulation, the query/data helpers,
+# and Streamlit's AppTest runner. Tests use publisher data or explicit errors.
 import unittest
 from unittest.mock import patch
 from core import DEFAULT, plan_query
 from rasters import load_sources
 from streamlit.testing.v1 import AppTest
 
-
-
 # MoonScout.ipynb cell 18
 # export: test_app.py
+
+# AutomaticSourceTests groups query, real-data cache, UI, and failure-path
+# checks. Source-loading tests may download publisher data on a cold cache.
 class AutomaticSourceTests(unittest.TestCase):
+    
+    # Verify that changing shortlist size preserves the previous TiO2 priority.
     def test_followup(self):
         p=plan_query('top 5',plan_query('highest TiO2',DEFAULT))
         self.assertEqual(p['top_n'],5)
         self.assertEqual(p['priority'],'tio2')
+    
+    # Check real sample counts, TiO2 bounds, all nine download receipts, and
+    # equality of the sample table returned by a second cached load.
     def test_sources_and_cache(self):
         data,provenance=load_sources()
         self.assertGreater(len(data),100)
@@ -24,6 +32,9 @@ class AutomaticSourceTests(unittest.TestCase):
         self.assertEqual(len([p for p in provenance if 'sha256' in p]),9)
         again,_=load_sources()
         self.assertTrue(data.equals(again))
+    
+    # Run the generated Streamlit app, confirm automatic loading and absence
+    # of upload controls, then exercise a query and Methods-page navigation.
     def test_automatic_app(self):
         at=AppTest.from_file(str(__import__('pathlib').Path(__file__).with_name('app.py')),default_timeout=120).run()
         self.assertFalse(at.exception)
@@ -37,6 +48,9 @@ class AutomaticSourceTests(unittest.TestCase):
         self.assertEqual(at.session_state['plan']['priority'],'tio2')
         at.sidebar.radio[0].set_value('Methods & project').run()
         self.assertFalse(at.exception)
+    
+    # Simulate a source-loader connection error, then verify an error and retry
+    # control appear with no loaded samples or substitute result table.
     def test_source_failure_has_no_fallback(self):
         with patch('rasters.load_sources',side_effect=ConnectionError('Source unavailable')):
             at=AppTest.from_file(str(__import__('pathlib').Path(__file__).with_name('app.py')),default_timeout=120).run()
@@ -46,9 +60,9 @@ class AutomaticSourceTests(unittest.TestCase):
         self.assertTrue(any('could not be loaded' in e.value for e in at.error))
         self.assertTrue(any(b.label=='Retry source loading' for b in at.button))
 
-
-
 # MoonScout.ipynb cell 19
 # export: test_app.py
-if __name__=='__main__': unittest.main()
 
+# Run unittest only when the generated test_app.py is executed directly;
+# importing it for test discovery does not start another test run.
+if __name__=='__main__': unittest.main()
