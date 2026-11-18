@@ -1,5 +1,5 @@
-# GENERATED FROM SELENE.ipynb. Edit the notebook, not this file.
-# SELENE.ipynb cell 10
+# GENERATED FROM MoonScout.ipynb. Edit the notebook, not this file.
+# MoonScout.ipynb cell 10
 # export: rasters.py
 """Fixed publisher sources. No user-supplied files, URLs, or generated measurements."""
 from pathlib import Path
@@ -21,13 +21,13 @@ SOURCE_PAGES = {
 BASE='https://pds.lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/LROLRC_2001/DATA/SDP/WAC_TIO2/'
 OMAT_URL='https://asc-pds-services.s3.us-west-2.amazonaws.com/mosaic/Lunar_MI_mineral_maps/4ppd/Lunar_Kaguya_MIMap_MineralDeconv_OpticalMaturityIndex_50N50S.tif'
 TILES=[f'WAC_TIO2_E350{hem}{lon}.IMG' for hem in ['N','S'] for lon in ['0450','1350','2250','3150']]
-CACHE=Path(os.environ.get('SELENE_DATA_DIR', str(Path(__file__).parent/'.data')))
+CACHE=Path(os.environ.get('MoonScout_DATA_DIR', str(Path(__file__).parent/'.data')))
 LOCK=threading.Lock()
 VERSION=1
 
 
 
-# SELENE.ipynb cell 11
+# MoonScout.ipynb cell 11
 # export: rasters.py
 def download(url,name):
     path=CACHE/name
@@ -54,7 +54,7 @@ def download(url,name):
 
 
 
-# SELENE.ipynb cell 12
+# MoonScout.ipynb cell 12
 # export: rasters.py
 def sample(ds,lon,lat):
     crs=CRS.from_user_input(ds.crs)
@@ -73,7 +73,7 @@ def sample(ds,lon,lat):
 
 
 
-# SELENE.ipynb cell 13
+# MoonScout.ipynb cell 13
 # export: rasters.py
 def load_sources(progress=lambda message: None):
     with LOCK:

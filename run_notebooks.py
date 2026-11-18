@@ -1,4 +1,4 @@
-"""Export SELENE.ipynb into application modules and run Streamlit."""
+"""Export MoonScout.ipynb into application modules and run Streamlit."""
 import argparse
 import ast
 import json
@@ -13,7 +13,7 @@ MODULES = ('app', 'core', 'rasters', 'test_app')
 def export_notebooks(root=ROOT):
     """Export marked cells in order; validate every module before writing any."""
     root = Path(root).resolve()
-    notebook = json.loads((root / 'SELENE.ipynb').read_text(encoding='utf-8-sig'))
+    notebook = json.loads((root / 'MoonScout.ipynb').read_text(encoding='utf-8-sig'))
     parts = {name: [] for name in MODULES}
     for index, cell in enumerate(notebook.get('cells', []), 1):
         if cell.get('cell_type') != 'code':
@@ -34,15 +34,15 @@ def export_notebooks(root=ROOT):
         if source.splitlines()[0] != f'# export: {name}.py':
             raise ValueError(f'Cell {index}: visible export marker must match export:{name} tag.')
         try:
-            ast.parse(source, filename=f'SELENE.ipynb cell {index}')
+            ast.parse(source, filename=f'MoonScout.ipynb cell {index}')
         except SyntaxError as error:
-            raise ValueError(f'SELENE.ipynb cell {index}: use standard Python, not notebook magics. {error}') from error
-        parts[name].append(f'# SELENE.ipynb cell {index}\n{source}\n')
+            raise ValueError(f'MoonScout.ipynb cell {index}: use standard Python, not notebook magics. {error}') from error
+        parts[name].append(f'# MoonScout.ipynb cell {index}\n{source}\n')
     sources = {}
     for name, chunks in parts.items():
         if not chunks:
-            raise ValueError(f'SELENE.ipynb has no code for {name}.py')
-        sources[name] = '# GENERATED FROM SELENE.ipynb. Edit the notebook, not this file.\n' + '\n'.join(chunks)
+            raise ValueError(f'MoonScout.ipynb has no code for {name}.py')
+        sources[name] = '# GENERATED FROM MoonScout.ipynb. Edit the notebook, not this file.\n' + '\n'.join(chunks)
         compile(sources[name], f'{name}.py', 'exec')
     for name, source in sources.items():
         target = root / f'{name}.py'
@@ -59,10 +59,10 @@ def main():
     args = parser.parse_args()
     runtime = export_notebooks()
     if args.check:
-        print(f'Validated SELENE.ipynb and exported {len(MODULES)} modules to {runtime}')
+        print(f'Validated MoonScout.ipynb and exported {len(MODULES)} modules to {runtime}')
         return 0
     environment = os.environ.copy()
-    environment['SELENE_DATA_DIR'] = str(ROOT / '.data')
+    environment['MoonScout_DATA_DIR'] = str(ROOT / '.data')
     if args.test:
         command = [sys.executable, '-m', 'unittest', 'discover', '-s', str(runtime), '-v']
     else:

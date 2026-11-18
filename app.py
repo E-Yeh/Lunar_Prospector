@@ -1,5 +1,5 @@
-# GENERATED FROM SELENE.ipynb. Edit the notebook, not this file.
-# SELENE.ipynb cell 15
+# GENERATED FROM MoonScout.ipynb. Edit the notebook, not this file.
+# MoonScout.ipynb cell 15
 # export: app.py
 import json
 import os
@@ -10,7 +10,7 @@ import folium
 from core import DEFAULT, fit_terrain, plan_query, rank_sites, explain
 from rasters import load_sources, SOURCE_PAGES
 
-st.set_page_config(page_title='SELENE | Lunar prospecting', page_icon='🌘', layout='wide')
+st.set_page_config(page_title='MoonScout | Lunar prospecting', page_icon='🌘', layout='wide')
 st.markdown('''<style>.block-container{padding-top:2rem}h1{letter-spacing:-1.8px} div[data-testid="stMetric"]{background:#151e2d;padding:12px;border-radius:12px} div[data-testid="stMetricValue"]{font-size:1.4rem} .eyebrow{color:#76e0c5;letter-spacing:3px;font-size:12px}</style>''',unsafe_allow_html=True)
 
 # Invalidate old sessions, including data and messages from the removed demo mode.
@@ -20,7 +20,7 @@ if st.session_state.get('data_policy_version') != 3:
                             provenance=[], plan=dict(DEFAULT), history=[])
 
 with st.sidebar:
-    st.markdown('### 🌘 SELENE')
+    st.markdown('### 🌘 MoonScout')
     st.caption('LUNAR PROSPECTING WORKSPACE')
     page = st.radio('Workspace', ['Explore','Methods & project'],label_visibility='collapsed')
     st.divider()

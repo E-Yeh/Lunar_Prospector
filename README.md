@@ -1,4 +1,4 @@
-# SELENE — automatically loaded lunar prospecting
+# MoonScout — automatically loaded lunar prospecting
 
 The app loads all its scientific data itself. There are no file uploaders, local-path fields, import screens, or configurable source URLs.
 
@@ -48,7 +48,7 @@ Tests use the app-loaded real source cache for the normal path, and a simulated 
 
 ## Single notebook source of truth
 
-Edit **SELENE.ipynb** for all application code. It contains sections for core analysis, raster loading, the Streamlit interface, and tests. The launcher `run_notebooks.py` remains a small separate bootstrap utility.
+Edit **MoonScout.ipynb** for all application code. It contains sections for core analysis, raster loading, the Streamlit interface, and tests. The launcher `run_notebooks.py` remains a small separate bootstrap utility.
 
 ```powershell
 python run_notebooks.py --check

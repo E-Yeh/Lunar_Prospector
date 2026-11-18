@@ -1,5 +1,5 @@
-# GENERATED FROM SELENE.ipynb. Edit the notebook, not this file.
-# SELENE.ipynb cell 3
+# GENERATED FROM MoonScout.ipynb. Edit the notebook, not this file.
+# MoonScout.ipynb cell 3
 # export: core.py
 """Deterministic data tools used by the prospecting workflow."""
 import json
@@ -15,7 +15,7 @@ DEFAULT = dict(west=-60., east=60., south=-40., north=40., minimum_tio2=2., top_
 
 
 
-# SELENE.ipynb cell 4
+# MoonScout.ipynb cell 4
 # export: core.py
 def fit_terrain(df, k=4):
     df = df.copy().reset_index(drop=True)
@@ -31,7 +31,7 @@ def fit_terrain(df, k=4):
 
 
 
-# SELENE.ipynb cell 5
+# MoonScout.ipynb cell 5
 # export: core.py
 def validate_plan(plan):
     if set(plan) != set(DEFAULT):
@@ -49,7 +49,7 @@ def validate_plan(plan):
 
 
 
-# SELENE.ipynb cell 6
+# MoonScout.ipynb cell 6
 # export: core.py
 def plan_query(query, current, use_llm=False, model='gemma3:4b'):
     if not query.strip():
@@ -87,7 +87,7 @@ def plan_query(query, current, use_llm=False, model='gemma3:4b'):
 
 
 
-# SELENE.ipynb cell 7
+# MoonScout.ipynb cell 7
 # export: core.py
 def rank_sites(df, plan):
     validate_plan(plan)
@@ -97,7 +97,7 @@ def rank_sites(df, plan):
 
 
 
-# SELENE.ipynb cell 8
+# MoonScout.ipynb cell 8
 # export: core.py
 def explain(result, plan):
     if result.empty:

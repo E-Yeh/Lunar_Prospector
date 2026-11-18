@@ -1,5 +1,5 @@
-# GENERATED FROM SELENE.ipynb. Edit the notebook, not this file.
-# SELENE.ipynb cell 17
+# GENERATED FROM MoonScout.ipynb. Edit the notebook, not this file.
+# MoonScout.ipynb cell 17
 # export: test_app.py
 """Tests use publisher data or a network failure, never generated measurements."""
 import unittest
@@ -10,7 +10,7 @@ from streamlit.testing.v1 import AppTest
 
 
 
-# SELENE.ipynb cell 18
+# MoonScout.ipynb cell 18
 # export: test_app.py
 class AutomaticSourceTests(unittest.TestCase):
     def test_followup(self):
@@ -48,7 +48,7 @@ class AutomaticSourceTests(unittest.TestCase):
 
 
 
-# SELENE.ipynb cell 19
+# MoonScout.ipynb cell 19
 # export: test_app.py
 if __name__=='__main__': unittest.main()
 
