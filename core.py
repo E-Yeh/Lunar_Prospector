@@ -16,9 +16,11 @@ from sklearn.metrics import silhouette_score
 # DEFAULT defines the initial search region in degrees, minimum TiO2 in wt%,
 # maximum shortlist size, and ranking priority. Callers copy it before editing.
 DEFAULT = dict(west=-60., east=60., south=-40., north=40., minimum_tio2=2., top_n=8, priority='balanced')
+
 # OpenAI configuration: an environment variable can select another model that
 # supports Responses API Structured Outputs. The app also reads Streamlit secrets.
 OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4.1-mini')
+
 # Optional code-based key location requested by the project owner. Leave empty
 # for a published repository and configure OPENAI_API_KEY in Streamlit secrets.
 OPENAI_API_KEY = ''

@@ -20,8 +20,7 @@ st.markdown('''<style>.block-container{padding-top:2rem}h1{letter-spacing:-1.8px
 # Invalidate old sessions, including data and messages from the removed demo mode.
 if st.session_state.get('data_policy_version') != 3:
     st.session_state.clear()
-    st.session_state.update(data_policy_version=3, data=None, silhouette=None,
-                            provenance=[], plan=dict(DEFAULT), history=[])
+    st.session_state.update(data_policy_version=3, data=None, silhouette=None, provenance=[], plan=dict(DEFAULT), history=[])
 
 # Read server configuration without displaying or storing credentials in chat.
 # Streamlit secrets take precedence over environment variables and code defaults.
