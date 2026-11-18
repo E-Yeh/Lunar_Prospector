@@ -52,6 +52,7 @@ PLAN_SCHEMA = {
 # proxy scores, and a sampled silhouette score; the input table is not modified.
 def fit_terrain(df, k=4):
     df = df.copy().reset_index(drop=True)
+    
     # Require enough rows and distinct feature pairs for the requested cluster count.
     if len(df)<k or len(df[['tio2','omat']].drop_duplicates())<k:
         raise ValueError('Need at least four distinct valid TiO2/OMAT samples.')

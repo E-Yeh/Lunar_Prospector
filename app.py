@@ -50,7 +50,6 @@ with st.sidebar:
         st.caption(f'{len(st.session_state.data):,} valid samples · 4 terrain groups')
 
 # Display the shared title and approved-source description on both pages.
-st.markdown('<div class="eyebrow">MoonScout / EXPLORATORY INTELLIGENCE</div>',unsafe_allow_html=True)
 st.title('Find your next lunar lead.')
 st.caption('Compare titanium abundance and optical maturity. Build a shortlist for further investigation.')
 st.caption('Data sources: LROC WAC TiO₂ abundance and USGS Kaguya MI OMAT only.')
