@@ -10,7 +10,7 @@ import numpy as np
 import streamlit as st
 import leafmap.foliumap as leafmap
 import folium
-from core import DEFAULT, fit_terrain, plan_query, rank_sites, explain
+from core import DEFAULT, fit_terrain, plan_query, rank_sites, explain, OPENAI_API_KEY, OPENAI_MODEL
 from rasters import load_sources, SOURCE_PAGES
 
 # Configure the browser page and inject the interface's compact visual styling.
@@ -23,17 +23,28 @@ if st.session_state.get('data_policy_version') != 3:
     st.session_state.update(data_policy_version=3, data=None, silhouette=None,
                             provenance=[], plan=dict(DEFAULT), history=[])
 
-# Build navigation and optional local-LLM controls; page, use_llm, and model
-# record widget selections for the current run.
+# Read server configuration without displaying or storing credentials in chat.
+# Streamlit secrets take precedence over environment variables and code defaults.
+def server_setting(name, default=''):
+    try:
+        value = st.secrets.get(name)
+    except FileNotFoundError:
+        value = None
+    return str(value or os.getenv(name) or default).strip()
+
+api_key = server_setting('OPENAI_API_KEY', OPENAI_API_KEY)
+model = server_setting('OPENAI_MODEL', OPENAI_MODEL)
+
+# Navigation and query-engine status. All questions use OpenAI.
 with st.sidebar:
     st.markdown('### 🌘 MoonScout')
     st.caption('LUNAR PROSPECTING WORKSPACE')
     page = st.radio('Workspace', ['Explore','Methods & project'],label_visibility='collapsed')
     st.divider()
     st.caption('QUERY ENGINE')
-    use_llm = st.toggle('Use local Ollama LLM', value=False)
-    model = st.text_input('Ollama model', value=os.getenv('OLLAMA_MODEL','gemma3:4b'), disabled=not use_llm)
-    st.caption('Ollama must be running on this server at localhost:11434. Offline mode uses a small, explicit command grammar.')
+    st.caption(f'OpenAI · {model}')
+    if not api_key:
+        st.warning('Set OPENAI_API_KEY in the app secrets to enable questions.')
     st.divider()
     st.write('No dataset loaded' if st.session_state.data is None else 'Source raster data')
     if st.session_state.data is not None:
@@ -93,18 +104,18 @@ if page == 'Explore':
         st.caption('Try “highest TiO2”, then “top 5”. Follow-ups retain the current region and filters.')
         with st.form('question',clear_on_submit=True):
             question=st.text_area('Prospecting question',placeholder='Find the best spots',height=105)
-            run=st.form_submit_button('Find candidates',type='primary')
+            run=st.form_submit_button('Find candidates',type='primary', disabled=not api_key)
         
         # On submission, parse and validate the question, rank real samples, and
         # create a grounded summary before committing the new plan and conversation.
         if run:
             try:
                 with st.spinner('Plan → validate → retrieve → rank → explain'):
-                    new_plan=plan_query(question,st.session_state.plan,use_llm,model)
+                    new_plan=plan_query(question,st.session_state.plan,api_key=api_key,model=model)
                     results=rank_sites(st.session_state.data,new_plan)
                     response=explain(results,new_plan)
                 st.session_state.plan=new_plan
-                st.session_state.history.append((question,response,'Ollama' if use_llm else 'Offline parser'))
+                st.session_state.history.append((question,response,f'OpenAI · {model}'))
             except Exception as error:
                 st.error(f'Query stopped; previous results retained. {error}')
         
@@ -227,5 +238,5 @@ else:
         st.json(st.session_state.provenance)
     st.caption('OMAT uses the publisher-provided 4 ppd scientific overview of the linked 512 ppd product. The map samples every 2 degrees and cannot identify local maxima at full raster resolution. Credit: JAXA/MoonScout; Lemelin et al. (2016).')
     st.markdown('### Sources & setup')
-    st.markdown('- [LROC WAC TiO₂ product and calibration](https://data.lroc.im-ldi.com/lroc/view_rdr/WAC_TIO2)\n- [USGS Kaguya OMAT product](https://astrogeology.usgs.gov/search/map/kaguya_lunar_multiband_imager_mi_derived_optical_maturity_omat_50n50s_512ppd_59mpp)\n- [Leafmap Streamlit integration](https://leafmap.org/foliumap/)\n- [Ollama chat API](https://docs.ollama.com/api/chat)')
-    st.info('LLM integration is implemented but requires a running Ollama model. Offline mode is not an LLM. A recorded walkthrough, representative LLM benchmark and real-product calibration validation remain follow-up work.')
+    st.markdown('- [LROC WAC TiO₂ product and calibration](https://data.lroc.im-ldi.com/lroc/view_rdr/WAC_TIO2)\n- [USGS Kaguya OMAT product](https://astrogeology.usgs.gov/search/map/kaguya_lunar_multiband_imager_mi_derived_optical_maturity_omat_50n50s_512ppd_59mpp)\n- [Leafmap Streamlit integration](https://leafmap.org/foliumap/)\n- [OpenAI Responses API](https://developers.openai.com/api/docs/guides/responses)')
+    st.info('Questions use the OpenAI Responses API; there is no offline parser. The question and current plan are sent to OpenAI. Ranking and result summaries use deterministic code and real raster samples. Live-model evaluation and real-product calibration validation remain follow-up work.')

@@ -36,7 +36,24 @@ StandardScaler and KMeans use TiO2 and OMAT, k=4, n_init=10, seed 530. Terrain g
 
 Try `highest TiO2`, then `top 5`. Region and ranking controls adjust the retrieved candidates. Export the shortlist and provenance from Explore. Methods & project explains the workflow and shows source receipts.
 
-Optional local Ollama integration translates natural language into validated query plans at localhost:11434. Enable it only with an installed running model. Offline command parsing is explicitly labeled and is not an LLM. No live model behavior has been validated here.
+All questions use the OpenAI Responses API with strict Structured Outputs, followed by local plan validation. There is no Ollama service, engine toggle, or offline parser. The default model is `gpt-4.1-mini`; configure `OPENAI_MODEL` server-side to use another Responses/Structured Outputs-compatible model. The existing deterministic retrieval, K-means, ranking, and factual summary remain unchanged.
+
+### Streamlit deployment configuration
+
+In your published app's **Settings → Secrets**, save:
+
+```toml
+OPENAI_API_KEY = "your-key-here"
+OPENAI_MODEL = "gpt-4.1-mini"
+```
+
+Locally, the same entries can go in `.streamlit/secrets.toml` (already ignored by Git), or environment variables. The notebook's core configuration cell also contains `OPENAI_API_KEY = ''` as the requested optional code-based location. Secrets take precedence over environment variables, then the code default. Never commit a real key in the notebook or generated Python files; use Streamlit secrets for the published app.
+
+Save notebook edits and run `python run_notebooks.py --check`, then upload/commit the notebook and generated modules together. Streamlit Cloud can continue using `app.py` as its entry point; it does not export the notebook automatically. This integration uses the existing `requests` dependency, so no new package is required.
+
+Only the submitted question and current plan are sent to OpenAI, not raster files. Requests set `store=false`. Missing credentials disable question submission; authentication, quota, network, refusal, incomplete-output, or validation failures retain previous results and show an error. Manual region controls remain available. API requests incur usage charges; public app visitors use the configured project's key. API protocol and failure handling are tested with mocked responses; live model behavior requires a configured key and has not been validated here.
+
+References: [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs), [Streamlit secrets](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management).
 
 ## Checks
 

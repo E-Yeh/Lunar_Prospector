@@ -3,9 +3,9 @@
 # export: core.py
 
 # Import JSON/regex helpers, numerical tables, HTTP requests, and scikit-learn tools
-# Used for deterministic analysis and optional Ollama query planning.
+# Used for deterministic analysis and OpenAI query planning.
 import json
-import re
+import os
 import numpy as np
 import pandas as pd
 import requests
@@ -16,6 +16,32 @@ from sklearn.metrics import silhouette_score
 # DEFAULT defines the initial search region in degrees, minimum TiO2 in wt%,
 # maximum shortlist size, and ranking priority. Callers copy it before editing.
 DEFAULT = dict(west=-60., east=60., south=-40., north=40., minimum_tio2=2., top_n=8, priority='balanced')
+# OpenAI configuration: an environment variable can select another model that
+# supports Responses API Structured Outputs. The app also reads Streamlit secrets.
+OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4.1-mini')
+# Optional code-based key location requested by the project owner. Leave empty
+# for a published repository and configure OPENAI_API_KEY in Streamlit secrets.
+OPENAI_API_KEY = ''
+
+# A strict envelope lets the model explicitly decline unsupported requests.
+# Every plan field is required; validate_plan still enforces numeric/business rules.
+PLAN_SCHEMA = {
+    'type': 'object', 'additionalProperties': False,
+    'properties': {
+        'supported': {'type': 'boolean'},
+        'plan': {
+            'type': 'object', 'additionalProperties': False,
+            'properties': {
+                **{key: {'type': 'number'} for key in
+                   ['west', 'east', 'south', 'north', 'minimum_tio2']},
+                'top_n': {'type': 'integer'},
+                'priority': {'type': 'string', 'enum': ['balanced', 'tio2', 'maturity']},
+            },
+            'required': list(DEFAULT),
+        },
+    },
+    'required': ['supported', 'plan'],
+}
 
 # MoonScout.ipynb cell 4
 # export: core.py
@@ -75,53 +101,71 @@ def validate_plan(plan):
 # MoonScout.ipynb cell 6
 # export: core.py
 
-# plan_query translates a question into a validated search plan, retaining prior
-# settings unless the supported request changes them. It does not retrieve data.
-def plan_query(query, current, use_llm=False, model='gemma3:4b'):
+# plan_query sends a question and current constraints to OpenAI and returns a
+# validated plan. It never sends raster files, executes model code, or uses an
+# offline parser. Failed requests leave state management to the calling UI.
+def plan_query(query, current, api_key=None, model=OPENAI_MODEL):
     if not query.strip():
         raise ValueError('Enter a prospecting question.')
-    
-    # Optional Ollama mode asks a model on this server for JSON only; requests for
-    # unavailable measurements are instructed to return an error.
-    if use_llm:
-        system = ('Translate lunar prospecting requests into JSON. Only fields in the current plan are allowed. '
-                  'Preserve prior values unless changed by the user. priority is balanced, tio2, or maturity. '
-                  'Bounds are degrees east [-180,180] and north [-90,90]. minimum_tio2 is wt%. '
-                  'For unsupported requests (helium abundance, solar wind, slope, landing safety, other elements) '
-                  'return {"error":"Explain missing data"}. Do not invent measurements. Current plan: '+json.dumps(current))
-        
-        # Send the current plan and question to the local chat endpoint. Connection and
-        # response timeouts keep an unavailable model from waiting indefinitely.
-        response = requests.post('http://localhost:11434/api/chat', json=dict(model=model,
-            messages=[dict(role='system',content=system),dict(role='user',content=query)],
-            format='json', stream=False, options={'temperature':0}), timeout=(5,90))
-        response.raise_for_status()
-        plan = json.loads(response.json()['message']['content'])
-        if 'error' in plan:
-            raise ValueError(str(plan['error']))
-        
-        # Validate model output with the same deterministic rules as manual controls.
-        return validate_plan(plan)
-    
-    # Offline mode normalizes case and trailing punctuation, then copies the plan
-    # and accepts only the explicit commands below; unsupported questions fail.
-    q = query.lower().strip().rstrip('.?!')
-    plan = dict(current)
-    
-    # Explicit, limited offline grammar: never silently ignore an arbitrary constraint.
-    if q in ['find the best spots','find me the best spot for helium-3 mining','balanced']:
-        plan['priority'] = 'balanced'
-    elif q in ['highest tio2','show highest tio2','rank by tio2']:
-        plan['priority'] = 'tio2'
-    elif q in ['most mature','rank by maturity']:
-        plan['priority'] = 'maturity'
-    elif re.fullmatch(r'top \d+',q):
-        plan['top_n'] = int(q.split()[1])
-    elif re.fullmatch(r'minimum tio2 \d+(\.\d+)?',q):
-        plan['minimum_tio2'] = float(q.split()[-1])
-    else:
-        raise ValueError('Offline mode supports: highest TiO2; most mature; top 5; minimum TiO2 4; find the best spots. Use the region controls or connect Ollama for flexible questions. Solar wind, other elements and landing safety are not available.')
-    return validate_plan(plan)
+    validate_plan(current)
+    key = (api_key or os.getenv('OPENAI_API_KEY') or OPENAI_API_KEY).strip()
+    if not key:
+        raise ValueError('Configure OPENAI_API_KEY in Streamlit secrets or the server environment.')
+    system = (
+        'Translate lunar prospecting requests into the supplied JSON schema. '
+        'Preserve current plan values unless the user changes them. '
+        'Bounds are degrees east [-180,180] and north [-90,90]; minimum_tio2 is wt%. '
+        'top_n must be 1-50. priority is balanced, tio2, or maturity. '
+        'Lower OMAT means greater optical maturity. Best spots means balanced proxy ranking. '
+        'Only geographic bounds, TiO2 thresholds, candidate count, and these ranking priorities are supported. '
+        'For requests requiring helium abundance, solar wind, slope, landing safety, other elements, '
+        'mining feasibility, or any unavailable constraint, set supported=false and return the current plan unchanged. '
+        'Never silently drop an unsupported constraint or invent measurements. '
+        'For supported requests set supported=true. Current plan: ' + json.dumps(current)
+    )
+    # REST avoids an additional SDK dependency. Disable response storage and bound
+    # connection/read waits. Credentials stay in the server-side Authorization header.
+    try:
+        response = requests.post(
+            'https://api.openai.com/v1/responses',
+            headers={'Authorization': f'Bearer {key}'},
+            json={
+                'model': model, 'store': False, 'max_output_tokens': 1200,
+                'input': [{'role': 'system', 'content': system},
+                          {'role': 'user', 'content': query}],
+                'text': {'format': {'type': 'json_schema', 'name': 'lunar_query',
+                                    'strict': True, 'schema': PLAN_SCHEMA}},
+            }, timeout=(10, 90),
+        )
+    except requests.RequestException:
+        raise ValueError('OpenAI could not be reached. Please retry shortly.') from None
+    # Do not echo raw provider errors, request headers, or keys into the public UI.
+    if response.status_code in (401, 403):
+        raise ValueError('OpenAI authentication failed. Check the server API key and project access.')
+    if response.status_code == 429:
+        raise ValueError('OpenAI quota or rate limit reached. Check billing or retry later.')
+    if response.status_code != 200:
+        raise ValueError('OpenAI request failed. Check the configured model and service availability.')
+    try:
+        payload = response.json()
+        if payload.get('status') != 'completed':
+            raise ValueError('incomplete')
+        # Responses may contain non-message items. Read only assistant text and
+        # reject refusals instead of treating them as a valid query plan.
+        content = [part for item in payload.get('output', [])
+                   if item.get('type') == 'message' for part in item.get('content', [])]
+        if any(part.get('type') == 'refusal' for part in content):
+            raise ValueError('refused')
+        envelope = json.loads(''.join(part['text'] for part in content
+                                      if part.get('type') == 'output_text'))
+        if set(envelope) != {'supported', 'plan'} or type(envelope['supported']) is not bool:
+            raise ValueError('invalid envelope')
+        plan = validate_plan(envelope['plan'])
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise ValueError('OpenAI did not return a complete valid query plan. Please rephrase or retry.') from None
+    if not envelope['supported']:
+        raise ValueError('This request requires unavailable data or constraints. Use lunar bounds, TiO2, optical maturity, and candidate count.')
+    return plan
 
 # MoonScout.ipynb cell 7
 # export: core.py
