@@ -12,6 +12,7 @@ import leafmap.foliumap as leafmap
 import folium
 # Altair (bundled with Streamlit) gives both comparison plots identical axes.
 import altair as alt
+from sklearn.metrics import adjusted_rand_score
 from core import DEFAULT, fit_terrain, plan_query, rank_sites, explain, OPENAI_API_KEY, OPENAI_MODEL, EXPOSURE_MODEL, select_terrain
 from rasters import load_sources, SOURCE_PAGES
 
@@ -20,9 +21,9 @@ st.set_page_config(page_title='MoonScout | Lunar prospecting', page_icon='🌘',
 st.markdown('''<style>.block-container{padding-top:2rem}h1{letter-spacing:-1.8px} div[data-testid="stMetric"]{background:#151e2d;padding:12px;border-radius:12px} div[data-testid="stMetricValue"]{font-size:1.4rem} .eyebrow{color:#76e0c5;letter-spacing:3px;font-size:12px}</style>''',unsafe_allow_html=True)
 
 # Invalidate old fitted tables so every session gains both model labels and diagnostics.
-if st.session_state.get('data_policy_version') != 5:
+if st.session_state.get('data_policy_version') != 6:
     st.session_state.clear()
-    st.session_state.update(data_policy_version=5, data=None, silhouette=None, provenance=[], plan=dict(DEFAULT), history=[])
+    st.session_state.update(data_policy_version=6, data=None, terrain_runs={}, silhouette=None, provenance=[], plan=dict(DEFAULT), history=[])
 
 # Read server configuration without displaying or storing credentials in chat.
 # Streamlit secrets take precedence over environment variables and code defaults.
@@ -41,12 +42,23 @@ with st.sidebar:
     st.markdown('### 🌘 MoonScout')
     st.caption('LUNAR PROSPECTING WORKSPACE')
     page = st.radio('Workspace', ['Explore','Methods & project'],label_visibility='collapsed')
+    # Both feature experiments are fitted once on identical source rows.
+    # This selector only swaps the active table, so a visual comparison does
+    # not trigger downloads/refits or alter the user's prospecting query.
+    feature_set = st.selectbox('Clustering features', ['TiO2 + OMAT','TiO2 + OMAT + exposure'], key='feature_set')
+    if st.session_state.terrain_runs:
+        st.session_state.data = st.session_state.terrain_runs[feature_set]
+        st.session_state.silhouette = st.session_state.data.attrs['terrain_comparison']['kmeans_silhouette']
     # Switching models only selects existing labels; no model is refitted on
     # each widget interaction. K-means remains the default and always works
     # even if the experimental GMM cannot converge on a particular dataset.
     available = ['K-means']
     if st.session_state.data is not None and st.session_state.data.attrs['terrain_comparison']['gmm_available']:
         available.append('GMM')
+    # A failed GMM in one experiment cannot leave an invalid widget choice
+    # carried over from the other experiment. Reset to the available baseline.
+    if st.session_state.get('terrain_method','K-means') not in available:
+        st.session_state.terrain_method = 'K-means'
     terrain_method = st.selectbox('Terrain model', available, key='terrain_method')
     st.caption('Compare both models in Methods & project. Ranking is unchanged.')
     st.divider()
@@ -71,8 +83,13 @@ if page == 'Explore':
         try:
             with st.status('Loading approved lunar datasets…', expanded=True) as status:
                 data, provenance = load_sources(st.write)
-                clustered, silhouette = fit_terrain(data)
-                st.session_state.update(data=clustered, silhouette=silhouette, provenance=provenance)
+                # Hold rows, group count, seed and initializations constant;
+                # only the feature set differs between these paired fits.
+                baseline, _ = fit_terrain(data)
+                with_exposure, _ = fit_terrain(data, include_exposure=True)
+                runs={'TiO2 + OMAT':baseline,'TiO2 + OMAT + exposure':with_exposure}
+                clustered=runs[feature_set]
+                st.session_state.update(data=clustered, terrain_runs=runs, silhouette=clustered.attrs['terrain_comparison']['kmeans_silhouette'], provenance=provenance)
                 status.update(label='Source datasets loaded', state='complete', expanded=False)
             st.rerun()
         
@@ -153,7 +170,7 @@ if page == 'Explore':
         a.metric('Shortlisted',len(result))
         b.metric('Top TiO₂',f'{result.tio2.max():.2f} wt%' if len(result) else '—')
         c.metric('Terrain groups',result.cluster.nunique())
-        st.caption(f'Terrain labels: {terrain_method}. Numbers and colors are local to each model, not matching geological classes.')
+        st.caption(f'Terrain labels: {terrain_method}; features: {feature_set}. Numbers/colors are local to each fit, not matching geological classes.')
         layer=st.selectbox('Surface layer',['TiO₂ abundance','Optical maturity','Terrain groups','Modeled solar-wind exposure'])
         
         # Simple CRS maps lunar longitude/latitude directly; Earth distance tools are disabled.
@@ -228,7 +245,7 @@ if page == 'Explore':
         else:
             # Retain both assignments in the shortlist so switching labels is
             # auditable. Only show GMM fields when its fit actually succeeded.
-            columns=['site_id','latitude','longitude','tio2','omat','solar_wind_exposure','terrain_model','cluster','kmeans_cluster','score']
+            columns=['site_id','latitude','longitude','tio2','omat','solar_wind_exposure','terrain_model','terrain_features','cluster','kmeans_cluster','score']
             if 'gmm_cluster' in result:
                 columns += ['gmm_cluster','gmm_max_membership']
                 st.caption('GMM max membership describes group assignment under the model; it is not He-3 confidence.')
@@ -244,7 +261,8 @@ else:
     st.markdown('### How the pieces fit')
     st.code('Question → LLM JSON plan → validation → raster sample retrieval\n                                           ↓\nPublisher rasters → common lunar grid → standardization → K-means / GMM comparison\n                                           ↓\n                     proxy ranking → Leafmap + table + explanation')
     st.markdown('### Compare K-means and GMM')
-    st.write('Both methods fit the same standardized TiO₂ and OMAT samples, with four groups, ten starts and seed 530. GMM uses full covariance, allowing tilted elliptical components and soft memberships. Coordinates and modeled exposure are excluded. K-means remains the default; choose Terrain model in the sidebar to change Explore labels.')
+    st.write('Both methods fit the same samples with four groups, ten starts and seed 530. The Clustering features selector adds modeled exposure as a third standardized feature. Coordinates are never direct features, but exposure introduces geographic structure. GMM uses full covariance and soft memberships. K-means with TiO₂ + OMAT remains the default.')
+    st.caption(f'Active feature set: {feature_set}. Every selected feature has unit variance after scaling; this is not a scientific reliability weighting.')
     if st.session_state.data is None:
         st.info('Open Explore to load samples and fit the comparison.')
     else:
@@ -278,7 +296,9 @@ else:
         for panel,(name,label) in zip(panels,methods):
             with panel:
                 st.markdown(f'#### {name}')
-                profile=data.groupby(label).agg(samples=('site_id','count'),mean_tio2=('tio2','mean'),mean_omat=('omat','mean')).reset_index().rename(columns={label:'group'})
+                # Exposure averages help explain geographic splits even in
+                # the baseline, where exposure is not a clustering input.
+                profile=data.groupby(label).agg(samples=('site_id','count'),mean_tio2=('tio2','mean'),mean_omat=('omat','mean'),mean_exposure=('solar_wind_exposure','mean')).reset_index().rename(columns={label:'group'})
                 st.dataframe(profile.round(3),hide_index=True)
                 # Fix scales explicitly: independently auto-scaled panels can
                 # make the same sample distribution look different by accident.
@@ -289,6 +309,10 @@ else:
                         domain=['0','1','2','3'],range=['#70e1c4','#f5b86b','#9898f0','#eb83ae'])),
                     tooltip=['site_id','tio2','omat',label]).properties(height=280)
                 st.altair_chart(chart,use_container_width=True)
+                # A second projection makes splits along the new exposure
+                # dimension visible; the TiO2/OMAT chart alone hides them.
+                exposure_chart=chart.encode(y=alt.Y('solar_wind_exposure:Q',title='Modeled exposure (0–1)',scale=alt.Scale(domain=[0,1])),tooltip=['site_id','tio2','omat','solar_wind_exposure',label])
+                st.altair_chart(exposure_chart,use_container_width=True)
         if report['gmm_available']:
             # A cross-tab reveals how groups split/merge. Comparing numeric IDs
             # directly would be misleading because each algorithm names arbitrarily.
@@ -306,13 +330,41 @@ else:
         # configuration and source receipts separately so the comparison is repeatable.
         st.download_button('Download terrain comparison (CSV)',data.drop(columns=['cluster','terrain_model']).to_csv(index=False),'terrain-comparison.csv','text/csv')
         st.download_button('Download comparison diagnostics (JSON)',json.dumps({'comparison':report,'source_provenance':st.session_state.provenance},indent=2,default=str),'terrain-comparison.json','application/json')
+        st.markdown('### What changes when exposure is included?')
+        # Compare each algorithm against ITSELF across feature sets. ARI
+        # ignores arbitrary group numbering, unlike a raw label mismatch
+        # percentage. Cross-tabs show splits and merges without asserting
+        # that baseline group 0 should correspond to exposure group 0.
+        import pandas as pd
+        baseline=st.session_state.terrain_runs['TiO2 + OMAT']
+        augmented=st.session_state.terrain_runs['TiO2 + OMAT + exposure']
+        paired=baseline[['site_id','latitude','longitude','tio2','omat','solar_wind_exposure']].copy()
+        experiment_metrics=[]
+        for name,label,metric in [('K-means','kmeans_cluster','kmeans_silhouette'),('GMM','gmm_cluster','gmm_silhouette')]:
+            if label not in baseline or label not in augmented:
+                st.info(f'{name} before/after comparison unavailable because one fit failed.')
+                continue
+            # Join by stable site ID, not incidental row order. Validate a
+            # one-to-one pairing so each observation is counted once.
+            assignments=baseline[['site_id',label]].merge(augmented[['site_id',label]],on='site_id',validate='one_to_one',suffixes=('_baseline','_exposure'))
+            before,after=assignments[label+'_baseline'],assignments[label+'_exposure']
+            ari=float(adjusted_rand_score(before,after))
+            experiment_metrics.append({'model':name,'before_after_ARI':ari,'baseline_2D_silhouette':baseline.attrs['terrain_comparison'][metric],'exposure_3D_silhouette':augmented.attrs['terrain_comparison'][metric]})
+            st.markdown(f'#### {name}: baseline versus exposure')
+            st.caption(f'Before/after ARI: {ari:.3f}. Rows = baseline groups; columns = exposure groups; counts include all source samples.')
+            st.dataframe(pd.crosstab(before,after))
+            paired=paired.merge(assignments,on='site_id',validate='one_to_one')
+        st.dataframe(pd.DataFrame(experiment_metrics).round(3),hide_index=True)
+        st.caption('ARI describes how much the partition changes, not whether it improves. The 2D and 3D silhouettes use different distance spaces: do not treat their difference as proof of improvement. BIC/AIC are also not comparable across these feature sets. Exposure can produce broad latitude/longitude divisions because it is modeled from geography.')
+        st.download_button('Download exposure experiment assignments (CSV)',paired.to_csv(index=False),'exposure-experiment.csv','text/csv')
+        st.download_button('Download exposure experiment settings (JSON)',json.dumps({'runs':{key:value.attrs['terrain_comparison'] for key,value in st.session_state.terrain_runs.items()},'before_after':experiment_metrics,'source_provenance':st.session_state.provenance},indent=2,default=str),'exposure-experiment.json','application/json')
     st.markdown('### Ranking and limitations')
     st.write('Balanced score = 100 × (0.65 × TiO₂ percentile + 0.35 × inverse-OMAT percentile) within the loaded source dataset. This is an explicit exploratory heuristic, not a trained helium-3 model. Lower OMAT is treated as greater optical maturity, not a direct solar-wind exposure measurement. Pure TiO₂ and maturity rankings are also available. No helium-3 ground truth, slope, landing safety, other elements, extraction economics or direct solar-wind data are included.')
     st.write('WAC abundance values below 2 wt% are below the product detection limit; values above 15 wt% are excluded. OMAT outside 0–1 is excluded as a prototype quality check. Verify product-specific calibration and masks. Grid sampling can miss small high-value regions; nearby shortlist rows are not independent deposits.')
     # Keep model provenance distinct from receipts for downloaded measurements.
     st.markdown('### Modeled relative solar-wind exposure')
     st.write('Flat-surface adaptation of Shukla et al. (2020), Eq. 4: integrate geographic incidence outside an assumed fully shielded 20% of the lunar orbit, then normalize to the equatorial farside maximum. Longitude 0° is the sub-Earth meridian. Values are dimensionless, not measured flux, accumulated dose, or helium-3 concentration. No OMNI data, terrain correction, local magnetic shielding, soil age, retention, or saturation is included.')
-    st.write('Select exposure ranking to sort by this index. Balanced ranking and TiO₂/OMAT K-means are unchanged; the model does not fill missing raster measurements. CSV and JSON exports record the model source and shielding assumption.')
+    st.write('Exposure ranking sorts by this index. Adding exposure to clustering is a separate experiment controlled by Clustering features; balanced ranking stays unchanged. No missing raster measurement is filled. CSV and JSON exports identify the feature set, model source and shielding assumption.')
     st.markdown('[Model reference: Shukla et al. (2020), Eq. 4](https://doi.org/10.3390/rs12203350)')
     with st.expander('Exposure model assumptions & provenance'):
         st.json(EXPOSURE_MODEL)

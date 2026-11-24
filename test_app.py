@@ -137,8 +137,21 @@ class AutomaticSourceTests(unittest.TestCase):
         [s for s in at.selectbox if s.label=='Terrain model'][0].set_value('GMM').run()
         self.assertFalse(at.exception)
         self.assertTrue((at.dataframe[0].value['terrain_model']=='GMM').all())
+        # Feature switching must preserve the query/shortlist while applying
+        # the already fitted 3D groups to map and table, including provenance.
+        before_ids=at.dataframe[0].value['site_id'].tolist()
+        [s for s in at.selectbox if s.label=='Clustering features'][0].set_value('TiO2 + OMAT + exposure').run()
+        self.assertFalse(at.exception)
+        self.assertEqual(before_ids,at.dataframe[0].value['site_id'].tolist())
+        self.assertTrue((at.dataframe[0].value['terrain_features']=='TiO2 + OMAT + exposure').all())
+        self.assertEqual(at.session_state['data'].attrs['terrain_comparison']['features'],['tio2','omat','solar_wind_exposure'])
         at.sidebar.radio[0].set_value('Methods & project').run()
         self.assertTrue(any(m.label=='Adjusted Rand agreement' for m in at.metric))
+        self.assertTrue(any('What changes when exposure' in m.value for m in at.markdown))
+        # Returning to baseline must restore cached 2D labels, not leave
+        # exposure-trained labels behind under a baseline selector title.
+        [s for s in at.selectbox if s.label=='Clustering features'][0].set_value('TiO2 + OMAT').run()
+        self.assertEqual(at.session_state['data'].attrs['terrain_comparison']['features'],['tio2','omat'])
         self.assertFalse(at.exception)
     
     # Simulate a source-loader connection error, then verify an error and retry
@@ -211,6 +224,7 @@ class TerrainComparisonTests(unittest.TestCase):
         from core import fit_terrain
         cls.raw,_=load_sources()
         cls.fitted,cls.silhouette=fit_terrain(cls.raw)
+        cls.augmented,_=fit_terrain(cls.raw,include_exposure=True)
 
     def test_memberships_and_identical_inputs(self):
         from sklearn.cluster import KMeans
@@ -225,6 +239,25 @@ class TerrainComparisonTests(unittest.TestCase):
         expected=KMeans(n_clusters=4,random_state=530,n_init=10).fit_predict(StandardScaler().fit_transform(self.raw[['tio2','omat']]))
         np.testing.assert_array_equal(expected.astype(str),data.kmeans_cluster)
         np.testing.assert_allclose(data.score,100*(.65*data.tio2.rank(pct=True)+.35*(-data.omat).rank(pct=True)))
+
+    def test_exposure_feature_experiment(self):
+        from core import rank_sites, geographic_exposure
+        # This is a paired experiment: observations and score values remain
+        # identical; only the clustering input gains a third dimension.
+        before,after=self.fitted,self.augmented
+        self.assertEqual(before.site_id.tolist(),after.site_id.tolist())
+        np.testing.assert_allclose(before.score,after.score)
+        np.testing.assert_allclose(after.solar_wind_exposure,geographic_exposure(after.latitude,after.longitude))
+        report=after.attrs['terrain_comparison']
+        self.assertEqual(report['features'],['tio2','omat','solar_wind_exposure'])
+        self.assertEqual(len(report['scaler_scale']),3)
+        self.assertEqual(report['exposure_model']['shielded_fraction'],.2)
+        self.assertTrue(report['gmm_available'])
+        np.testing.assert_allclose(after[[f'gmm_p_{i}' for i in range(4)]].sum(axis=1),1.)
+        for priority in ['balanced','tio2','maturity','exposure']:
+            plan=dict(DEFAULT,priority=priority)
+            self.assertEqual(rank_sites(before,plan).site_id.tolist(),rank_sites(after,plan).site_id.tolist())
+        self.assertNotIn('solar_wind_exposure',self.raw.columns)
 
     def test_switching_does_not_rerank_or_mutate(self):
         from core import select_terrain,rank_sites

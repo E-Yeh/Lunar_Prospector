@@ -72,7 +72,8 @@ The shortlist, marker popups, and explanations include the index. CSV exports
 include the model source, version, and shielding fraction; JSON provenance includes
 all assumptions separately from the downloaded raster receipts.
 
-K-means continues to use only TiO2 and OMAT. The 65/35 balanced score is unchanged;
+By default, K-means uses TiO2 and OMAT; the feature experiment can add modeled
+exposure to both clustering methods. The 65/35 balanced score is unchanged;
 exposure ranking is an explicit alternative. The model is evaluated only at valid
 source samples and never substitutes for missing TiO2 or OMAT. Existing raster
 caches can be reused; the app resets old session data when loading this version.
@@ -111,6 +112,82 @@ branch continuity, invalid inputs, range, shielding sensitivity, and an independ
 numerical orbital integration. Full `python -m unittest -v` also exercises the app
 against publisher rasters and can download about 1.2 GB on first use. These checks
 verify the implementation, not empirical accuracy of exposure or He-3 predictions.
+
+## K-means / GMM comparison
+
+K-means remains the default. After loading Explore, choose **Terrain model → GMM**
+in the sidebar to switch map, popup, shortlist and explanation labels. Both models
+are fitted once per session on the same standardized TiO2 and OMAT rows, with four
+groups, ten starts and seed 530. The default excludes coordinates and solar-wind
+exposure; the feature experiment below optionally adds modeled exposure.
+GMM uses full covariance, `reg_covar=1e-6`, and `max_iter=300`. Failed or unconverged
+GMM fits are reported and disabled; K-means remains available.
+
+**Methods & project** compares group sizes and feature averages, matched-axis
+scatterplots (same 2,000-row sample), silhouettes (same 1,500-row sample), adjusted
+Rand agreement, an assignment cross-tab, and ambiguous GMM memberships. Both
+sample sizes are capped by the available row count. GMM BIC/AIC are provided for
+later comparisons of GMM configurations on identical data/scaling, not against
+K-means. This implementation fits four components; it does not choose the optimum
+component count or automatically select a winning model.
+
+Silhouette is a hard-label distance diagnostic and may favor compact groups.
+ARI measures agreement, not truth. Group numbers/colors are arbitrary within each
+model. GMM membership probabilities are conditional on its assumptions, not
+calibrated geological confidence or probabilities of helium-3 abundance. Inspect
+group profiles and sensitivity as well as metrics before replacing K-means.
+
+Switching methods preserves query constraints, scores and candidate order. CSV
+exports include both label columns and all `gmm_p_0` ... `gmm_p_3` probabilities
+when GMM succeeds. JSON exports include fit settings, scaling parameters and
+diagnostics; Methods offers full comparison CSV/JSON downloads. Old conversation
+messages retain their original explicitly named model.
+
+Notebook change locations (1-based file order, including Markdown cells):
+- Cell 3: GaussianMixture and adjusted Rand imports.
+- Cell 4: commented `sampled_silhouette`, revised `fit_terrain`, and `select_terrain`.
+- Cell 8: include the selected model name in result explanations.
+- Cell 15: selector, consistent labels/exports, and comparison UI.
+- Cell 18: real-source model tests and GMM switching integration coverage.
+- Cells 2 and 14: section navigation notes.
+
+The notebook remains the source of truth; export `core.py`, `app.py`, and
+`test_app.py` together using `python run_notebooks.py --check`. Run
+`python -m unittest -v` to validate. No additional package installation is needed
+for GMM: scikit-learn is already required; charts use Streamlit's Altair dependency.
+
+## Exposure as a clustering feature
+
+Use **Clustering features** in the sidebar to switch between **TiO2 + OMAT**
+(default) and **TiO2 + OMAT + exposure**. Both K-means and GMM are fitted for each
+feature set once per session on exactly the same valid raster samples. The group
+count (4), starts (10), seed (530), and GMM configuration remain fixed. Switching
+features reuses these results and does not change the query, score, or shortlist
+order. The map, profiles, membership probabilities, and exports use the active fit.
+
+Exposure is calculated from the existing geographic model with shielding fraction
+0.20. It is standardized to unit variance alongside TiO2 and OMAT, not treated as
+a measured quantity or given a calibrated scientific weight. This can introduce
+broad geographic divisions. The balanced score remains the original 65/35 formula.
+
+In **Methods & project**, inspect the additional TiO2/exposure plots and mean
+exposure for each group. **What changes when exposure is included?** compares each
+algorithm with itself using adjusted Rand agreement and before/after count tables.
+Group numbers are arbitrary; the app does not equate same-numbered groups or report
+a misleading raw percentage of changed labels. ARI measures partition change, not
+improvement. Two- and three-dimensional silhouette scores use different distance
+spaces; BIC/AIC across these different feature spaces are also not comparable.
+
+Download **exposure experiment assignments (CSV)** for paired labels and coordinates,
+and **exposure experiment settings (JSON)** for both fits, scaler parameters, model
+assumptions, metrics, and source receipts. Regular shortlist CSVs identify the active
+feature set via `terrain_features`; query JSON includes the active fit settings.
+
+Direct notebook changes: cell 4 adds `include_exposure` to `fit_terrain`; cell 8
+identifies the feature set in explanations; cell 15 adds cached paired fits, the
+selector, comparison displays and downloads; cell 18 tests feature switching,
+probabilities and ranking invariance. Comments explain these choices in place.
+Export the notebook with `python run_notebooks.py --check` before deployment.
 
 ## Queries
 

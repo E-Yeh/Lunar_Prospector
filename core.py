@@ -100,8 +100,9 @@ def geographic_exposure(latitude, longitude, shielded_fraction=EXPOSURE_SHIELDED
 # MoonScout.ipynb cell 4
 # export: core.py
 
-# Both methods use the SAME standardized features and rows. Geographic exposure
-# stays outside clustering so this experiment isolates the choice of algorithm.
+# Both methods use the SAME standardized features and rows within each run.
+# The baseline excludes exposure; an explicit experiment adds it as a third
+# standardized feature without changing samples, rankings, or model settings.
 TERRAIN_FEATURES = ['tio2', 'omat']
 
 
@@ -116,7 +117,7 @@ def sampled_silhouette(x, labels, indices):
     return float(silhouette_score(x[indices], sampled_labels))
 
 
-def fit_terrain(df, k=4):
+def fit_terrain(df, k=4, include_exposure=False):
     """Fit K-means plus a GMM candidate; retain the existing two-value API.
 
     The returned frame keeps K-means as its active `cluster` column. Both sets
@@ -124,13 +125,22 @@ def fit_terrain(df, k=4):
     JSON-serializable diagnostics/configuration live in attrs['terrain_comparison'].
     """
     df = df.copy().reset_index(drop=True)
+    # Recompute the geographic index from coordinates rather than trusting a
+    # previously exported column. With exposure enabled, StandardScaler gives
+    # it unit variance like each other feature: this is a modeling choice,
+    # not a claim that geographic exposure is an equally reliable measurement.
+    if not isinstance(include_exposure, bool):
+        raise ValueError('include_exposure must be True or False.')
+    df['solar_wind_exposure'] = geographic_exposure(df.latitude, df.longitude)
+    feature_names = TERRAIN_FEATURES + (['solar_wind_exposure'] if include_exposure else [])
+    df['terrain_features'] = 'TiO2 + OMAT + exposure' if include_exposure else 'TiO2 + OMAT'
     if isinstance(k, bool) or not isinstance(k, (int, np.integer)) or k < 2:
         raise ValueError('Terrain comparison requires an integer group count of at least 2.')
-    features = df[TERRAIN_FEATURES].to_numpy(dtype=float)
+    features = df[feature_names].to_numpy(dtype=float)
     if not np.isfinite(features).all():
         raise ValueError('Terrain features must contain only finite values.')
-    if len(df) <= k or len(df[TERRAIN_FEATURES].drop_duplicates()) < k:
-        raise ValueError(f'Need more than {k} rows and at least {k} distinct TiO2/OMAT pairs.')
+    if len(df) <= k or len(df[feature_names].drop_duplicates()) < k:
+        raise ValueError(f'Need more than {k} rows and at least {k} distinct feature vectors.')
 
     # Fit the scaler once, then pass exactly the same matrix to both methods.
     # This prevents unit differences (wt% versus OMAT) from dominating distances.
@@ -141,7 +151,6 @@ def fit_terrain(df, k=4):
     df['cluster'] = df['kmeans_cluster']
     df['terrain_model'] = 'K-means'
     df['site_id'] = [f'L{i:05d}' for i in range(len(df))]
-    df['solar_wind_exposure'] = geographic_exposure(df.latitude, df.longitude)
     # Ranking is deliberately independent of grouping. Switching methods must
     # not change candidate IDs/order, proxy scores, or geographic exposure.
     df['score'] = 100*(.65*df.tio2.rank(pct=True)+.35*(-df.omat).rank(pct=True))
@@ -150,7 +159,9 @@ def fit_terrain(df, k=4):
     # records the sample size and seed so evaluation can be reproduced.
     indices = np.random.RandomState(530).permutation(len(df))[:min(1500,len(df))]
     km_sil = sampled_silhouette(x, km.labels_, indices)
-    report = dict(features=TERRAIN_FEATURES.copy(), groups=int(k), seed=530,
+    report = dict(features=feature_names, include_exposure=include_exposure,
+                  exposure_model=dict(EXPOSURE_MODEL) if include_exposure else None,
+                  groups=int(k), seed=530,
                   n_init=10, samples=len(df), silhouette_samples=len(indices),
                   scaler_mean=scaler.mean_.tolist(), scaler_scale=scaler.scale_.tolist(),
                   kmeans_silhouette=km_sil, gmm_silhouette=None,
@@ -328,7 +339,8 @@ def explain(result, plan):
     prefix = 'Imported raster samples: '
     return (f'{prefix}{len(result)} candidates ranked by {plan["priority"]}. '
             f'Leading sample {row.site_id} is at {row.latitude:.2f}°N, {row.longitude:.2f}°E, '
-            f'with TiO2 {row.tio2:.2f} wt%, OMAT {row.omat:.3f}, and {row.terrain_model} terrain group {row.cluster}. '
+            f'with TiO2 {row.tio2:.2f} wt%, OMAT {row.omat:.3f}, and {row.terrain_model} terrain group {row.cluster} '
+            f'(features: {row.terrain_features}). '
             f'Modeled relative solar-wind exposure is {row.solar_wind_exposure:.3f} on a 0-1 scale '
             f'(shielded fraction {EXPOSURE_SHIELDED_FRACTION:.2f}; not measured flux). '
             'These proxies support follow-up investigation; they do not measure helium-3 or establish landing suitability.')
