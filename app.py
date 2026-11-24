@@ -10,17 +10,19 @@ import numpy as np
 import streamlit as st
 import leafmap.foliumap as leafmap
 import folium
-from core import DEFAULT, fit_terrain, plan_query, rank_sites, explain, OPENAI_API_KEY, OPENAI_MODEL, EXPOSURE_MODEL
+# Altair (bundled with Streamlit) gives both comparison plots identical axes.
+import altair as alt
+from core import DEFAULT, fit_terrain, plan_query, rank_sites, explain, OPENAI_API_KEY, OPENAI_MODEL, EXPOSURE_MODEL, select_terrain
 from rasters import load_sources, SOURCE_PAGES
 
 # Configure the browser page and inject the interface's compact visual styling.
 st.set_page_config(page_title='MoonScout | Lunar prospecting', page_icon='🌘', layout='wide')
 st.markdown('''<style>.block-container{padding-top:2rem}h1{letter-spacing:-1.8px} div[data-testid="stMetric"]{background:#151e2d;padding:12px;border-radius:12px} div[data-testid="stMetricValue"]{font-size:1.4rem} .eyebrow{color:#76e0c5;letter-spacing:3px;font-size:12px}</style>''',unsafe_allow_html=True)
 
-# Invalidate old sessions so cached fitted tables gain the new exposure column.
-if st.session_state.get('data_policy_version') != 4:
+# Invalidate old fitted tables so every session gains both model labels and diagnostics.
+if st.session_state.get('data_policy_version') != 5:
     st.session_state.clear()
-    st.session_state.update(data_policy_version=4, data=None, silhouette=None, provenance=[], plan=dict(DEFAULT), history=[])
+    st.session_state.update(data_policy_version=5, data=None, silhouette=None, provenance=[], plan=dict(DEFAULT), history=[])
 
 # Read server configuration without displaying or storing credentials in chat.
 # Streamlit secrets take precedence over environment variables and code defaults.
@@ -39,6 +41,14 @@ with st.sidebar:
     st.markdown('### 🌘 MoonScout')
     st.caption('LUNAR PROSPECTING WORKSPACE')
     page = st.radio('Workspace', ['Explore','Methods & project'],label_visibility='collapsed')
+    # Switching models only selects existing labels; no model is refitted on
+    # each widget interaction. K-means remains the default and always works
+    # even if the experimental GMM cannot converge on a particular dataset.
+    available = ['K-means']
+    if st.session_state.data is not None and st.session_state.data.attrs['terrain_comparison']['gmm_available']:
+        available.append('GMM')
+    terrain_method = st.selectbox('Terrain model', available, key='terrain_method')
+    st.caption('Compare both models in Methods & project. Ranking is unchanged.')
     st.divider()
     st.caption('QUERY ENGINE')
     st.caption(f'OpenAI · {model}')
@@ -77,6 +87,8 @@ if page == 'Explore':
     
     # Read the current plan, then collect region and ranking edits in a form
     # so they are validated and applied together on submission.
+    # Apply one model selection consistently to every Explore output.
+    active_data=select_terrain(st.session_state.data, terrain_method)
     plan=st.session_state.plan
     with st.expander('Region & ranking controls',expanded=False):
         with st.form('controls'):
@@ -110,7 +122,7 @@ if page == 'Explore':
             try:
                 with st.spinner('Plan → validate → retrieve → rank → explain'):
                     new_plan=plan_query(question,st.session_state.plan,api_key=api_key,model=model)
-                    results=rank_sites(st.session_state.data,new_plan)
+                    results=rank_sites(active_data,new_plan)
                     response=explain(results,new_plan)
                 st.session_state.plan=new_plan
                 st.session_state.history.append((question,response,f'OpenAI · {model}'))
@@ -135,12 +147,13 @@ if page == 'Explore':
     # Recompute the shortlist from current constraints and define summary metrics
     # and the selected display field (TiO2, OMAT, cluster ID, or modeled exposure).
     with right:
-        result=rank_sites(st.session_state.data,st.session_state.plan)
+        result=rank_sites(active_data,st.session_state.plan)
         st.subheader('02 / Survey the candidates')
         a,b,c=st.columns(3)
         a.metric('Shortlisted',len(result))
         b.metric('Top TiO₂',f'{result.tio2.max():.2f} wt%' if len(result) else '—')
         c.metric('Terrain groups',result.cluster.nunique())
+        st.caption(f'Terrain labels: {terrain_method}. Numbers and colors are local to each model, not matching geological classes.')
         layer=st.selectbox('Surface layer',['TiO₂ abundance','Optical maturity','Terrain groups','Modeled solar-wind exposure'])
         
         # Simple CRS maps lunar longitude/latitude directly; Earth distance tools are disabled.
@@ -151,7 +164,7 @@ if page == 'Explore':
         # Remove any default Earth tile layers that the map constructor may add.
         for key in list(m._children):
             if isinstance(m._children[key],folium.raster_layers.TileLayer): del m._children[key]
-        data=st.session_state.data
+        data=active_data
         
         # The surface preview uses all samples inside the geographic bounds, while
         # the shortlist also applies the minimum TiO2 and candidate-count filters.
@@ -197,7 +210,7 @@ if page == 'Explore':
         # Add numbered shortlist markers with exact coordinates, proxy values,
         # and terrain labels, then frame the map using the selected bounds.
         for rank,row in enumerate(result.itertuples(),1):
-            popup=f'#{rank} · {row.site_id}<br>{row.latitude:.2f}°N, {row.longitude:.2f}°E<br>TiO₂ {row.tio2:.2f} wt%<br>OMAT {row.omat:.3f}<br>Modeled exposure {row.solar_wind_exposure:.3f} (0–1)<br>Terrain {row.cluster}'
+            popup=f'#{rank} · {row.site_id}<br>{row.latitude:.2f}°N, {row.longitude:.2f}°E<br>TiO₂ {row.tio2:.2f} wt%<br>OMAT {row.omat:.3f}<br>Modeled exposure {row.solar_wind_exposure:.3f} (0–1)<br>{row.terrain_model} terrain {row.cluster}'
             folium.Marker([row.latitude,row.longitude],tooltip=f'#{rank} {row.site_id}',popup=popup,
                 icon=folium.DivIcon(html=f'<div style="background:#76e0c5;color:#101722;border:2px solid white;border-radius:50%;width:25px;height:25px;text-align:center;font-weight:bold">{rank}</div>')).add_to(m)
         p=st.session_state.plan
@@ -213,9 +226,15 @@ if page == 'Explore':
         # with source links, and JSON containing the query and provenance.
         if result.empty: st.info(explain(result,p))
         else:
-            st.dataframe(result[['site_id','latitude','longitude','tio2','omat','solar_wind_exposure','cluster','score']].round(3),hide_index=True,width='stretch')
+            # Retain both assignments in the shortlist so switching labels is
+            # auditable. Only show GMM fields when its fit actually succeeded.
+            columns=['site_id','latitude','longitude','tio2','omat','solar_wind_exposure','terrain_model','cluster','kmeans_cluster','score']
+            if 'gmm_cluster' in result:
+                columns += ['gmm_cluster','gmm_max_membership']
+                st.caption('GMM max membership describes group assignment under the model; it is not He-3 confidence.')
+            st.dataframe(result[columns].round(3),hide_index=True,width='stretch')
             st.download_button('Download shortlist (CSV)',result.assign(tio2_source=SOURCE_PAGES['tio2'],omat_source=SOURCE_PAGES['omat'],exposure_model_source=EXPOSURE_MODEL['source'],exposure_model_version=EXPOSURE_MODEL['version'],exposure_shielded_fraction=EXPOSURE_MODEL['shielded_fraction']).to_csv(index=False),'lunar-shortlist.csv','text/csv')
-            st.download_button('Download query & provenance',json.dumps({'plan':p,'provenance':st.session_state.provenance,'exposure_model':EXPOSURE_MODEL},indent=2,default=str),'provenance.json','application/json')
+            st.download_button('Download query & provenance',json.dumps({'plan':p,'provenance':st.session_state.provenance,'exposure_model':EXPOSURE_MODEL,'terrain_model':terrain_method,'terrain_comparison':active_data.attrs['terrain_comparison']},indent=2,default=str),'provenance.json','application/json')
 
 # The Methods page explains the pipeline, cluster diagnostics, heuristic
 # ranking, source limitations, provenance, and local-model setup.
@@ -223,16 +242,70 @@ else:
     st.subheader('A prospecting aid, with evidence in view')
     st.write('Designed for exploratory analysts comparing potential lunar prospecting regions. A successful interaction produces a traceable shortlist, not a mining or landing authorization.')
     st.markdown('### How the pieces fit')
-    st.code('Question → LLM JSON plan → validation → raster sample retrieval\n                                           ↓\nPublisher rasters → common lunar grid → standardization → K-means groups\n                                           ↓\n                     proxy ranking → Leafmap + table + explanation')
-    st.markdown('### Traditional ML')
-    st.write('K-means groups samples using standardized TiO₂ and OMAT (4 groups, 10 initializations, seed 530). Latitude and longitude are excluded so groups represent similar proxy values rather than proximity. Group labels appear on the map and shortlist; the group summary supports comparison. Labels are arbitrary and refitted when the source sample set changes.')
-    if st.session_state.silhouette is not None:
-        st.metric('Sampled silhouette score',f'{st.session_state.silhouette:.3f}')
+    st.code('Question → LLM JSON plan → validation → raster sample retrieval\n                                           ↓\nPublisher rasters → common lunar grid → standardization → K-means / GMM comparison\n                                           ↓\n                     proxy ranking → Leafmap + table + explanation')
+    st.markdown('### Compare K-means and GMM')
+    st.write('Both methods fit the same standardized TiO₂ and OMAT samples, with four groups, ten starts and seed 530. GMM uses full covariance, allowing tilted elliptical components and soft memberships. Coordinates and modeled exposure are excluded. K-means remains the default; choose Terrain model in the sidebar to change Explore labels.')
+    if st.session_state.data is None:
+        st.info('Open Explore to load samples and fit the comparison.')
     else:
-        st.caption('Model results appear after automatic source loading on Explore.')
-    st.caption('Cluster separation only; this is not evidence of helium-3 prediction accuracy. Spatially correlated sampling and choice of region affect the result.')
-    if st.session_state.data is not None:
-        st.dataframe(st.session_state.data.groupby('cluster').agg(samples=('site_id','count'),mean_tio2=('tio2','mean'),mean_omat=('omat','mean')).round(3))
+        data = st.session_state.data
+        report = data.attrs['terrain_comparison']
+        # None metrics are genuinely undefined, not zero. Both silhouettes use
+        # the same standardized rows; ARI compares partitions without matching IDs.
+        def metric_text(value):
+            """Format optional diagnostics without implying unavailable values are zero."""
+            return 'Unavailable' if value is None else f'{value:.3f}'
+        a,b,c = st.columns(3)
+        a.metric('K-means silhouette',metric_text(report['kmeans_silhouette']))
+        b.metric('GMM silhouette',metric_text(report['gmm_silhouette']))
+        c.metric('Adjusted Rand agreement',metric_text(report['adjusted_rand']))
+        st.caption('Silhouette: higher indicates stronger distance separation of hard labels, not better He-3 prediction. It can favor compact K-means groups. ARI: 1 means identical partitions up to label renaming; near 0 is chance-level agreement. Agreement is not accuracy.')
+        st.write('GMM status: '+report['gmm_status'])
+        if report['gmm_available']:
+            st.caption(f"GMM mean maximum membership: {report['mean_max_membership']:.3f}. BIC: {report['gmm_bic']:.1f}; AIC: {report['gmm_aic']:.1f}. Lower BIC/AIC can compare GMM configurations on the same data and scaling; these are not comparisons against K-means. This screen fits four components only.")
+        else:
+            st.warning('GMM is unavailable. K-means remains usable; inspect the diagnostics below.')
+        # Show group profiles in ORIGINAL units for interpretation, including
+        # group sizes. GMM soft means and hard-assignment averages can differ;
+        # the table intentionally describes the displayed hard assignments.
+        methods = [('K-means','kmeans_cluster')]
+        if report['gmm_available']:
+            methods.append(('GMM','gmm_cluster'))
+        panels=st.columns(len(methods))
+        # The plots use exactly the same deterministic rows, fixed axis ranges,
+        # and units. Sampling limits browser work without changing the fitted data.
+        plot_data=data.sample(n=min(2000,len(data)),random_state=530)
+        for panel,(name,label) in zip(panels,methods):
+            with panel:
+                st.markdown(f'#### {name}')
+                profile=data.groupby(label).agg(samples=('site_id','count'),mean_tio2=('tio2','mean'),mean_omat=('omat','mean')).reset_index().rename(columns={label:'group'})
+                st.dataframe(profile.round(3),hide_index=True)
+                # Fix scales explicitly: independently auto-scaled panels can
+                # make the same sample distribution look different by accident.
+                chart=alt.Chart(plot_data).mark_circle(size=18,opacity=.45).encode(
+                    x=alt.X('tio2:Q',title='TiO₂ (wt%)',scale=alt.Scale(domain=[0,15])),
+                    y=alt.Y('omat:Q',title='OMAT',scale=alt.Scale(domain=[0,1])),
+                    color=alt.Color(f'{label}:N',title='Group',scale=alt.Scale(
+                        domain=['0','1','2','3'],range=['#70e1c4','#f5b86b','#9898f0','#eb83ae'])),
+                    tooltip=['site_id','tio2','omat',label]).properties(height=280)
+                st.altair_chart(chart,use_container_width=True)
+        if report['gmm_available']:
+            # A cross-tab reveals how groups split/merge. Comparing numeric IDs
+            # directly would be misleading because each algorithm names arbitrarily.
+            st.markdown('#### Assignment cross-tab (all samples)')
+            import pandas as pd
+            st.dataframe(pd.crosstab(data.kmeans_cluster,data.gmm_cluster))
+            st.markdown('#### Most ambiguous GMM assignments')
+            st.caption('Lowest maximum membership first. These are ambiguous group assignments, not necessarily poor prospecting candidates.')
+            probability_columns=[column for column in data if column.startswith('gmm_p_')]
+            st.dataframe(data.nsmallest(10,'gmm_max_membership')[['site_id','tio2','omat','gmm_cluster','gmm_max_membership']+probability_columns].round(3),hide_index=True)
+        st.caption('Labels/colors do not correspond across models. Both methods partition continuous proxies and may not recover real geological classes. Spatial correlation, feature choice and initialization affect results. No model is selected automatically from these metrics.')
+        with st.expander('Comparison settings and diagnostics'):
+            st.json(report)
+        # Export all rows and posterior columns for independent analysis. Include
+        # configuration and source receipts separately so the comparison is repeatable.
+        st.download_button('Download terrain comparison (CSV)',data.drop(columns=['cluster','terrain_model']).to_csv(index=False),'terrain-comparison.csv','text/csv')
+        st.download_button('Download comparison diagnostics (JSON)',json.dumps({'comparison':report,'source_provenance':st.session_state.provenance},indent=2,default=str),'terrain-comparison.json','application/json')
     st.markdown('### Ranking and limitations')
     st.write('Balanced score = 100 × (0.65 × TiO₂ percentile + 0.35 × inverse-OMAT percentile) within the loaded source dataset. This is an explicit exploratory heuristic, not a trained helium-3 model. Lower OMAT is treated as greater optical maturity, not a direct solar-wind exposure measurement. Pure TiO₂ and maturity rankings are also available. No helium-3 ground truth, slope, landing safety, other elements, extraction economics or direct solar-wind data are included.')
     st.write('WAC abundance values below 2 wt% are below the product detection limit; values above 15 wt% are excluded. OMAT outside 0–1 is excluded as a prototype quality check. Verify product-specific calibration and masks. Grid sampling can miss small high-value regions; nearby shortlist rows are not independent deposits.')

@@ -76,6 +76,13 @@ class OpenAIPlannerTests(unittest.TestCase):
 # AutomaticSourceTests groups query, real-data cache, UI, and failure-path
 # checks. Source-loading tests may download publisher data on a cold cache.
 class AutomaticSourceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Only the integration suite needs the native raster stack and Streamlit.
+        global load_sources, AppTest
+        from rasters import load_sources
+        from streamlit.testing.v1 import AppTest
+
     
     # Check real sample counts, TiO2 bounds, all nine download receipts, and
     # equality of the sample table returned by a second cached load.
@@ -104,6 +111,19 @@ class AutomaticSourceTests(unittest.TestCase):
             at.run()
         self.assertFalse(at.exception)
         self.assertEqual(at.session_state['plan']['priority'],'tio2')
+        # Exercise modeled exposure end-to-end using the real loaded samples.
+        at.text_area[0].set_value('highest solar wind exposure')
+        [b for b in at.button if b.label=='Find candidates'][0].click()
+        with patch('core.requests.post', return_value=api_response(dict(DEFAULT, priority='exposure'))):
+            at.run()
+        [s for s in at.selectbox if s.label=='Surface layer'][0].set_value('Modeled solar-wind exposure').run()
+        self.assertFalse(at.exception)
+        data = at.session_state['data']
+        self.assertTrue(data.solar_wind_exposure.between(0,1).all())
+        ranked = rank_sites(data, at.session_state['plan'])
+        self.assertTrue(ranked.solar_wind_exposure.is_monotonic_decreasing)
+        self.assertIn('solar_wind_exposure', at.dataframe[0].value.columns)
+        self.assertTrue(any('not measured flux' in item[1] for item in at.session_state['history']))
         previous = dict(at.session_state['plan'])
         history = list(at.session_state['history'])
         at.text_area[0].set_value('top 5')
@@ -113,7 +133,12 @@ class AutomaticSourceTests(unittest.TestCase):
         self.assertEqual(at.session_state['plan'], previous)
         self.assertEqual(at.session_state['history'], history)
         self.assertTrue(any('previous results retained' in e.value for e in at.error))
+        # Select GMM in Explore and verify labels and comparison displays render.
+        [s for s in at.selectbox if s.label=='Terrain model'][0].set_value('GMM').run()
+        self.assertFalse(at.exception)
+        self.assertTrue((at.dataframe[0].value['terrain_model']=='GMM').all())
         at.sidebar.radio[0].set_value('Methods & project').run()
+        self.assertTrue(any(m.label=='Adjusted Rand agreement' for m in at.metric))
         self.assertFalse(at.exception)
     
     # Simulate a source-loader connection error, then verify an error and retry
@@ -126,6 +151,106 @@ class AutomaticSourceTests(unittest.TestCase):
         self.assertEqual(len(at.dataframe),0)
         self.assertTrue(any('could not be loaded' in e.value for e in at.error))
         self.assertTrue(any(b.label=='Retry source loading' for b in at.button))
+
+class GeographicExposureTests(unittest.TestCase):
+    # Known physical limits: no shielding recovers cos(latitude), and the
+    # equatorial farside stays at one; poles receive zero in this zero-tilt model.
+    def test_reference_values_and_symmetry(self):
+        self.assertAlmostEqual(float(geographic_exposure(0, 0)), 1-np.sin(.2*np.pi))
+        self.assertAlmostEqual(float(geographic_exposure(0, 180)), 1.)
+        self.assertAlmostEqual(float(geographic_exposure(60, 180)), .5)
+        np.testing.assert_allclose(geographic_exposure([90,-90], 30), 0, atol=1e-15)
+        np.testing.assert_allclose(geographic_exposure([0,30,60], [0,45,180], 0),
+                                   np.cos(np.deg2rad([0,30,60])))
+        np.testing.assert_allclose(geographic_exposure(20, [-180,-90,-30,0,30,90,180]),
+                                   geographic_exposure(-20, [180,90,30,0,-30,-90,-180]))
+        np.testing.assert_allclose(geographic_exposure(0, [-180,-30,0]),
+                                   geographic_exposure(0, [180,330,360]))
+
+    # Independent quadrature checks the piecewise equation against integration
+    # of illuminated projected area, excluding the assumed magnetotail arc.
+    def test_against_orbital_integration(self):
+        phase = np.linspace(-np.pi, np.pi, 200000, endpoint=False) + np.pi/200000
+        for f in [0., .14, .20, .27, .5]:
+            for lon in [0., 54., 90., 126., 180., -75.]:
+                incidence = np.maximum(0., np.cos(np.deg2rad(lon)-phase))
+                allowed = np.abs(phase) >= f*np.pi
+                expected = np.sum(incidence*allowed) * (2*np.pi/len(phase)) / 2
+                self.assertAlmostEqual(float(geographic_exposure(0,lon,f)), expected, places=7)
+
+    # Check branch joins, range, and monotonic shielding across the globe.
+    def test_continuity_range_and_shielding(self):
+        for boundary in [54.,126.]:
+            self.assertAlmostEqual(float(geographic_exposure(0,boundary-1e-7)),
+                                   float(geographic_exposure(0,boundary+1e-7)), places=8)
+        lat,lon = np.meshgrid(np.linspace(-90,90,181),np.linspace(-180,180,361))
+        values = geographic_exposure(lat,lon)
+        self.assertTrue(np.all((values >= 0) & (values <= 1)))
+        self.assertTrue(np.all(geographic_exposure(lat,lon,.27) <= geographic_exposure(lat,lon,.14)+1e-14))
+
+    def test_invalid_inputs(self):
+        for lat,lon,f in [(91,0,.2),(0,np.nan,.2),(np.inf,0,.2),(0,0,-.1),
+                          (0,0,.51),(0,0,np.nan),(0,0,True)]:
+            with self.subTest(lat=lat,lon=lon,f=f), self.assertRaises(ValueError):
+                geographic_exposure(lat,lon,f)
+
+    # Exercise the exposure planner contract without an API call; retrieval is
+    # checked against real samples by AutomaticSourceTests above.
+    def test_exposure_query_plan(self):
+        expected = dict(DEFAULT, priority='exposure')
+        with patch('core.requests.post', return_value=api_response(expected)):
+            self.assertEqual(plan_query('highest solar wind exposure',DEFAULT,api_key='test-only-key'),expected)
+
+
+class TerrainComparisonTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Reuse publisher samples, never invented measurements, for integration
+        # and regression checks of both fits. A warm cache needs no network access.
+        from rasters import load_sources
+        from core import fit_terrain
+        cls.raw,_=load_sources()
+        cls.fitted,cls.silhouette=fit_terrain(cls.raw)
+
+    def test_memberships_and_identical_inputs(self):
+        from sklearn.cluster import KMeans
+        from sklearn.preprocessing import StandardScaler
+        data=self.fitted
+        self.assertTrue(data.attrs['terrain_comparison']['gmm_available'])
+        probabilities=data[[f'gmm_p_{i}' for i in range(4)]].to_numpy()
+        np.testing.assert_allclose(probabilities.sum(axis=1),1.)
+        self.assertTrue(np.all((probabilities>=0)&(probabilities<=1)))
+        np.testing.assert_array_equal(probabilities.argmax(axis=1).astype(str),data.gmm_cluster)
+        # The original K-means solution and balanced formula must remain intact.
+        expected=KMeans(n_clusters=4,random_state=530,n_init=10).fit_predict(StandardScaler().fit_transform(self.raw[['tio2','omat']]))
+        np.testing.assert_array_equal(expected.astype(str),data.kmeans_cluster)
+        np.testing.assert_allclose(data.score,100*(.65*data.tio2.rank(pct=True)+.35*(-data.omat).rank(pct=True)))
+
+    def test_switching_does_not_rerank_or_mutate(self):
+        from core import select_terrain,rank_sites
+        km=select_terrain(self.fitted,'K-means')
+        gm=select_terrain(self.fitted,'GMM')
+        np.testing.assert_array_equal(gm.cluster,gm.gmm_cluster)
+        np.testing.assert_array_equal(self.fitted.cluster,self.fitted.kmeans_cluster)
+        for priority in ['balanced','tio2','maturity','exposure']:
+            plan=dict(DEFAULT,priority=priority)
+            self.assertEqual(rank_sites(km,plan).site_id.tolist(),rank_sites(gm,plan).site_id.tolist())
+
+    def test_gmm_failure_preserves_kmeans(self):
+        from core import fit_terrain,select_terrain
+        # A failed optional fit must not fabricate memberships or disable retrieval.
+        with patch('core.GaussianMixture.fit',side_effect=ValueError('test failure')):
+            data,_=fit_terrain(self.raw)
+        self.assertFalse(data.attrs['terrain_comparison']['gmm_available'])
+        self.assertNotIn('gmm_cluster',data)
+        select_terrain(data,'K-means')
+        with self.assertRaises(ValueError):
+            select_terrain(data,'GMM')
+
+    def test_undefined_silhouette(self):
+        from core import sampled_silhouette
+        # Label-only numerical fixture: a collapsed partition has no silhouette.
+        self.assertIsNone(sampled_silhouette(np.zeros((3,2)),[0,0,0],np.arange(3)))
 
 # MoonScout.ipynb cell 19
 # export: test_app.py
