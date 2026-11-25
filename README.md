@@ -15,22 +15,23 @@ Open http://localhost:8501. First launch downloads about 1.2 GB into `.data/` be
 ## Fixed sources
 
 - LROC WAC TiO2: https://data.lroc.im-ldi.com/lroc/view_rdr/WAC_TIO2
+- USGS Kaguya MI SMFe: https://astrogeology.usgs.gov/search/map/moon_selene_kaguya_mi_derived_submicroscopic_metallic_iron_mosaic_59m
 - USGS Kaguya MI OMAT: https://astrogeology.usgs.gov/search/map/kaguya_lunar_multiband_imager_mi_derived_optical_maturity_omat_50n50s_512ppd_59mpp
 
 `rasters.py` downloads all eight WAC scientific PDS IMG abundance tiles from the LROC archive. The TIFFs under EXTRAS/BROWSE are 8-bit display products and are deliberately not used as wt% measurements. The IMG label identifies float32 TiO2 wt% values, about 400 m/pixel, and lunar projection metadata.
 
-For OMAT the app downloads the publisher's 4 ppd scientific overview of the same 50N–50S product from the USGS Astrogeology distribution:
+For OMAT and SMFe the app downloads the publisher's 4 ppd scientific overview of the same 50N–50S product from the USGS Astrogeology distribution:
 https://asc-pds-services.s3.us-west-2.amazonaws.com/mosaic/Lunar_MI_mineral_maps/index.html
 
 This is real source data at lower resolution, not the 59 m/pixel full-resolution raster. The full-resolution product is 184320×51200 float pixels (about 38 GB uncompressed). The app labels the overview resolution in the interface and provenance. Credit JAXA/SELENE and Lemelin et al. (2016).
 
 ## Processing and provenance
 
-A common 2-degree grid spans 180W–180E and 50S–50N. The app samples the nearest source pixel at grid centers, transforms coordinates using each raster's lunar CRS and handles longitude wrapping. It excludes missing or out-of-range samples (TiO2 0–15 wt%; OMAT 0–1). No missing measurement is fabricated or interpolated. This coarse overview cannot identify small local maxima or establish site suitability.
+A common 2-degree grid spans 180W–180E and 50S–50N. The app samples the nearest source pixel at grid centers, transforms coordinates using each raster's lunar CRS and handles longitude wrapping. It excludes missing or out-of-range samples (TiO2 0–15 wt%; OMAT 0–1; finite, nonnegative SMFe). No missing measurement is fabricated or interpolated. This coarse overview cannot identify small local maxima or establish site suitability.
 
 Atomic downloads include source URL, resolved URL, byte count and a locally calculated SHA-256 digest in `.data/`. The digest records downloaded content; it is not an independent publisher checksum. The sample cache is versioned. To refresh data, stop the server and remove `.data/` before restarting. Source URLs are fixed in code. Only successful complete downloads become cached files.
 
-StandardScaler and KMeans use TiO2 and OMAT, k=4, n_init=10, seed 530. Terrain groups appear on Leafmap and in the candidate table. Balanced ranking is a separate heuristic: 65% TiO2 percentile and 35% inverse-OMAT percentile. Neither is a measured helium-3 concentration. WAC values below 2 wt% are below its detection limit. There are no slope, landing safety, other-element or economics layers.
+StandardScaler and KMeans use TiO2 and OMAT, k=6, n_init=10, seed 530. Terrain groups appear on Leafmap and in the candidate table. Balanced ranking is a separate heuristic: 65% TiO2 percentile and 35% inverse-OMAT percentile. Neither is a measured helium-3 concentration. WAC values below 2 wt% are below its detection limit. There are no slope, landing safety or economics layers.
 
 ## Modeled relative solar-wind exposure
 
@@ -87,7 +88,7 @@ Existing cell IDs and order are preserved.
 | --- | --- | --- |
 | 2 | `804c2993` | Navigation note for analysis changes. |
 | 3 | `b2e65865` | Exposure configuration, provenance, commented `geographic_exposure` function; planner schema enum. |
-| 4 | `59643e57` | Attach modeled exposure after fitting the original terrain features. |
+| 4 | `59643e57` | Fit six-group feature/PCA experiments and record diagnostics. |
 | 5 | `c5b30403` | Validate the exposure ranking priority. |
 | 6 | `90139b91` | Planner instructions distinguish relative modeled exposure from unavailable measurements. |
 | 7 | `d74c716c` | Descending exposure ranking with existing filters and stable tie-breaking. |
@@ -117,9 +118,9 @@ verify the implementation, not empirical accuracy of exposure or He-3 prediction
 
 K-means remains the default. After loading Explore, choose **Terrain model → GMM**
 in the sidebar to switch map, popup, shortlist and explanation labels. Both models
-are fitted once per session on the same standardized TiO2 and OMAT rows, with four
+are fitted once per session on the same standardized TiO2 and OMAT rows, with six
 groups, ten starts and seed 530. The default excludes coordinates and solar-wind
-exposure; the feature experiment below optionally adds modeled exposure.
+exposure; the feature/PCA experiments below optionally add exposure and SMFe.
 GMM uses full covariance, `reg_covar=1e-6`, and `max_iter=300`. Failed or unconverged
 GMM fits are reported and disabled; K-means remains available.
 
@@ -128,7 +129,7 @@ scatterplots (same 2,000-row sample), silhouettes (same 1,500-row sample), adjus
 Rand agreement, an assignment cross-tab, and ambiguous GMM memberships. Both
 sample sizes are capped by the available row count. GMM BIC/AIC are provided for
 later comparisons of GMM configurations on identical data/scaling, not against
-K-means. This implementation fits four components; it does not choose the optimum
+K-means. This implementation fits six components; it does not choose the optimum
 component count or automatically select a winning model.
 
 Silhouette is a hard-label distance diagnostic and may favor compact groups.
@@ -138,7 +139,7 @@ calibrated geological confidence or probabilities of helium-3 abundance. Inspect
 group profiles and sensitivity as well as metrics before replacing K-means.
 
 Switching methods preserves query constraints, scores and candidate order. CSV
-exports include both label columns and all `gmm_p_0` ... `gmm_p_3` probabilities
+exports include both label columns and all `gmm_p_0` ... `gmm_p_5` probabilities
 when GMM succeeds. JSON exports include fit settings, scaling parameters and
 diagnostics; Methods offers full comparison CSV/JSON downloads. Old conversation
 messages retain their original explicitly named model.
@@ -156,12 +157,75 @@ The notebook remains the source of truth; export `core.py`, `app.py`, and
 `python -m unittest -v` to validate. No additional package installation is needed
 for GMM: scikit-learn is already required; charts use Streamlit's Altair dependency.
 
+## SMFe, PCA, and six-group experiments
+
+All K-means and GMM fits now request **six groups/components** (IDs 0–5).
+These are statistical groups, not six established terrain classes or He-3 levels.
+The default remains K-means on standardized TiO2 + OMAT.
+
+**Clustering features** offers TiO2 + OMAT, plus exposure, plus SMFe, or plus both.
+**Clustering space** selects original standardized features or **PCA (2 components)**.
+Eight experiments are cached per session, each containing both clustering methods.
+Initial fitting takes longer; switching selectors reuses the saved fits.
+
+SMFe comes from the [USGS/JAXA Kaguya derived SMFe product](https://astrogeology.usgs.gov/search/map/moon_selene_kaguya_mi_derived_submicroscopic_metallic_iron_mosaic_59m),
+using its publisher-provided [4 ppd scientific abundance TIFF](https://asc-pds-services.s3.us-west-2.amazonaws.com/mosaic/Lunar_MI_mineral_maps/4ppd/Lunar_Kaguya_MIMap_MineralDeconv_AbundanceSMFe_50N50S.tif).
+This is a separate raster from OMAT, not an SMFe estimate computed from OMAT.
+The product is spectrally modeled; it is not a direct measurement of solar-wind
+flux, accumulated dose, or helium-3. Values retain publisher abundance units:
+the linked label does not specify physical units, so no percent conversion is
+assumed. Standardization removes the numerical scale for clustering but does
+not validate calibration. Credit JAXA/SELENE and Lemelin et al. (2016).
+
+The loader samples SMFe on the existing 2-degree lunar grid, applies raster
+mask/scale/offset metadata, and excludes missing, nonfinite or negative SMFe.
+All experiments use the **same valid TiO2/OMAT/SMFe intersection**, even when SMFe
+is not an input. Cache version 2 rebuilds this shared sample mask. A version-1 sample cache with
+matching source URLs reuses its TiO2/OMAT values and receipts, sampling only the
+new SMFe raster; a fresh installation downloads all ten source products.
+This may change the old baseline's samples and percentile scores; switching
+experiments within the new version preserves samples, score, query and shortlist.
+SMFe has its own map layer, group-profile averages, source receipt and CSV column.
+
+PCA is preprocessing followed by K-means/GMM, not a standalone clustering method.
+A full deterministic SVD is fitted after StandardScaler, without whitening.
+The PCA experiment uses the first two scores. The baseline with two input
+features retains all variance (a rotation); three-/four-feature experiments
+discard variance and can change group assignments. PCA can highlight redundancy
+between OMAT and SMFe, but low-variance information may still be useful.
+PCA does not guarantee stronger geological interpretation or He-3 prediction.
+
+In **Methods & project**, inspect variance fractions, cumulative variance,
+component coefficients, feature correlations, and matched-axis PC1/PC2 plots.
+Component coefficients multiply standardized inputs; their signs are arbitrary.
+CSV exports include PC1/PC2 scores and `clustering_space`; JSON includes all
+components, PCA means, scaling, explained variance and clustering dimensions.
+
+Use **Reference experiment** and **Comparison experiment** to isolate a change:
+compare baseline with SMFe, then compare a fixed feature set before/after PCA.
+ARI and cross-tabs compare assignments independently of arbitrary numeric labels.
+Silhouette and GMM BIC/AIC from different features or reduced spaces are not
+direct evidence of improvement. Balanced ranking remains 65% TiO2 percentile
+plus 35% inverse-OMAT percentile; neither SMFe nor PCA changes that formula.
+
+Exact notebook locations (1-based cell order):
+- **Cell 3:** PCA import.
+- **Cell 4:** `TERRAIN_GROUPS=6`, `FEATURE_SETS`, commented SMFe/PCA preprocessing in `fit_terrain`, scores and diagnostics.
+- **Cell 8:** selected clustering space in result explanations.
+- **Cells 10 and 13:** SMFe source URL, cache version, sampling, common mask and provenance.
+- **Cell 15:** eight cached runs, selectors, six map colors, SMFe layer, PCA diagnostics and paired experiment exports.
+- **Cell 18:** real-source six-group/PCA checks and UI switching tests.
+
+The notebook is edited directly. Run `python run_notebooks.py --check` to regenerate
+`core.py`, `rasters.py`, `app.py` and `test_app.py`, then
+`python -m unittest -v` to test. No new editing scripts or dependencies are required.
+
 ## Exposure as a clustering feature
 
 Use **Clustering features** in the sidebar to switch between **TiO2 + OMAT**
 (default) and **TiO2 + OMAT + exposure**. Both K-means and GMM are fitted for each
 feature set once per session on exactly the same valid raster samples. The group
-count (4), starts (10), seed (530), and GMM configuration remain fixed. Switching
+count (6), starts (10), seed (530), and GMM configuration remain fixed. Switching
 features reuses these results and does not change the query, score, or shortlist
 order. The map, profiles, membership probabilities, and exports use the active fit.
 
@@ -171,15 +235,15 @@ a measured quantity or given a calibrated scientific weight. This can introduce
 broad geographic divisions. The balanced score remains the original 65/35 formula.
 
 In **Methods & project**, inspect the additional TiO2/exposure plots and mean
-exposure for each group. **What changes when exposure is included?** compares each
+exposure for each group. **What changes when exposure, SMFe, or PCA is included?** compares each
 algorithm with itself using adjusted Rand agreement and before/after count tables.
 Group numbers are arbitrary; the app does not equate same-numbered groups or report
 a misleading raw percentage of changed labels. ARI measures partition change, not
 improvement. Two- and three-dimensional silhouette scores use different distance
 spaces; BIC/AIC across these different feature spaces are also not comparable.
 
-Download **exposure experiment assignments (CSV)** for paired labels and coordinates,
-and **exposure experiment settings (JSON)** for both fits, scaler parameters, model
+Download **feature/PCA experiment assignments (CSV)** for paired labels and coordinates,
+and **feature/PCA experiment settings (JSON)** for all cached fits, scaler parameters, model
 assumptions, metrics, and source receipts. Regular shortlist CSVs identify the active
 feature set via `terrain_features`; query JSON includes the active fit settings.
 

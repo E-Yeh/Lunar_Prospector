@@ -13,6 +13,7 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score, adjusted_rand_score
 from sklearn.mixture import GaussianMixture
+from sklearn.decomposition import PCA
 
 # DEFAULT defines the initial search region in degrees, minimum TiO2 in wt%,
 # maximum shortlist size, and ranking priority. Callers copy it before editing.
@@ -101,9 +102,17 @@ def geographic_exposure(latitude, longitude, shielded_fraction=EXPOSURE_SHIELDED
 # export: core.py
 
 # Both methods use the SAME standardized features and rows within each run.
-# The baseline excludes exposure; an explicit experiment adds it as a third
-# standardized feature without changing samples, rankings, or model settings.
+# The baseline excludes exposure and SMFe; experiments add either or both.
+# Optional PCA reduces the standardized inputs before fitting the same models.
 TERRAIN_FEATURES = ['tio2', 'omat']
+# Six components are fixed across all experiments; label IDs are arbitrary.
+TERRAIN_GROUPS = 6
+FEATURE_SETS = {
+    'TiO2 + OMAT': (False, False),
+    'TiO2 + OMAT + exposure': (True, False),
+    'TiO2 + OMAT + SMFe': (False, True),
+    'TiO2 + OMAT + exposure + SMFe': (True, True),
+}
 
 
 def sampled_silhouette(x, labels, indices):
@@ -117,7 +126,7 @@ def sampled_silhouette(x, labels, indices):
     return float(silhouette_score(x[indices], sampled_labels))
 
 
-def fit_terrain(df, k=4, include_exposure=False):
+def fit_terrain(df, k=TERRAIN_GROUPS, include_exposure=False, include_smfe=False, use_pca=False):
     """Fit K-means plus a GMM candidate; retain the existing two-value API.
 
     The returned frame keeps K-means as its active `cluster` column. Both sets
@@ -129,11 +138,15 @@ def fit_terrain(df, k=4, include_exposure=False):
     # previously exported column. With exposure enabled, StandardScaler gives
     # it unit variance like each other feature: this is a modeling choice,
     # not a claim that geographic exposure is an equally reliable measurement.
-    if not isinstance(include_exposure, bool):
-        raise ValueError('include_exposure must be True or False.')
+    if not all(isinstance(flag, bool) for flag in [include_exposure, include_smfe, use_pca]):
+        raise ValueError('Feature and PCA switches must be True or False.')
     df['solar_wind_exposure'] = geographic_exposure(df.latitude, df.longitude)
-    feature_names = TERRAIN_FEATURES + (['solar_wind_exposure'] if include_exposure else [])
-    df['terrain_features'] = 'TiO2 + OMAT + exposure' if include_exposure else 'TiO2 + OMAT'
+    # SMFe is a spectrally derived abundance proxy, not measured He-3.
+    # Standardizing OMAT and SMFe separately can overweight shared maturity
+    # information; the UI exposes correlations and PCA coefficients to inspect it.
+    feature_names = TERRAIN_FEATURES + (['solar_wind_exposure'] if include_exposure else []) + (['smfe'] if include_smfe else [])
+    df['terrain_features'] = 'TiO2 + OMAT' + (' + exposure' if include_exposure else '') + (' + SMFe' if include_smfe else '')
+    df['clustering_space'] = 'PCA (2 components)' if use_pca else 'Standardized features'
     if isinstance(k, bool) or not isinstance(k, (int, np.integer)) or k < 2:
         raise ValueError('Terrain comparison requires an integer group count of at least 2.')
     features = df[feature_names].to_numpy(dtype=float)
@@ -145,7 +158,17 @@ def fit_terrain(df, k=4, include_exposure=False):
     # Fit the scaler once, then pass exactly the same matrix to both methods.
     # This prevents unit differences (wt% versus OMAT) from dominating distances.
     scaler = StandardScaler().fit(features)
-    x = scaler.transform(features)
+    standardized = scaler.transform(features)
+    # Fit a deterministic, unwhitened PCA on the SAME standardized inputs.
+    # Keep the full decomposition for variance/loadings diagnostics, and export
+    # PC1/PC2 scores even when clustering uses the original standardized space.
+    # PCA is preprocessing, not a clustering algorithm: K-means/GMM still assign
+    # the six groups. With two inputs, retaining two PCs only rotates the space;
+    # with three/four inputs it discards variance, possibly including useful signal.
+    pca = PCA(svd_solver='full', whiten=False).fit(standardized)
+    scores = pca.transform(standardized)
+    df['pca_1'], df['pca_2'] = scores[:,0], scores[:,1]
+    x = scores[:,:2] if use_pca else standardized
     km = KMeans(n_clusters=k, random_state=530, n_init=10).fit(x)
     df['kmeans_cluster'] = km.labels_.astype(str)
     df['cluster'] = df['kmeans_cluster']
@@ -160,6 +183,14 @@ def fit_terrain(df, k=4, include_exposure=False):
     indices = np.random.RandomState(530).permutation(len(df))[:min(1500,len(df))]
     km_sil = sampled_silhouette(x, km.labels_, indices)
     report = dict(features=feature_names, include_exposure=include_exposure,
+                  include_smfe=include_smfe, use_pca=use_pca,
+                  clustering_dimensions=int(x.shape[1]),
+                  pca={'components':pca.components_.tolist(),
+                       'mean':pca.mean_.tolist(),
+                       'explained_variance_ratio':pca.explained_variance_ratio_.tolist(),
+                       'retained_variance_2pc':float(pca.explained_variance_ratio_[:2].sum()),
+                       'whiten':False, 'svd_solver':'full'},
+                  feature_correlation=df[feature_names].corr().to_numpy().tolist(),
                   exposure_model=dict(EXPOSURE_MODEL) if include_exposure else None,
                   groups=int(k), seed=530,
                   n_init=10, samples=len(df), silhouette_samples=len(indices),

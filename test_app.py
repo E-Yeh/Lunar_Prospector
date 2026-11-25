@@ -84,16 +84,44 @@ class AutomaticSourceTests(unittest.TestCase):
         from streamlit.testing.v1 import AppTest
 
     
-    # Check real sample counts, TiO2 bounds, all nine download receipts, and
+    # Check real sample counts, TiO2 bounds, all ten download receipts, and
     # equality of the sample table returned by a second cached load.
     def test_sources_and_cache(self):
         data,provenance=load_sources()
         self.assertGreater(len(data),100)
         self.assertTrue(data.tio2.between(0,15).all())
-        self.assertEqual(len([p for p in provenance if 'sha256' in p]),9)
+        self.assertTrue(np.isfinite(data.smfe).all())
+        self.assertTrue(data.smfe.ge(0).all())
+        self.assertEqual(len([p for p in provenance if 'sha256' in p]),10)
         again,_=load_sources()
         self.assertTrue(data.equals(again))
     
+    def test_upgrade_adds_only_smfe_and_preserves_rows(self):
+        # Recreate a version-1 table from real cached observations in an isolated
+        # data directory. Only the new SMFe product may be requested; this guards
+        # against a 1.2 GB redownload and checks that the upgrade preserves rows.
+        import tempfile
+        from pathlib import Path
+        import rasters
+        data,provenance=load_sources()
+        source_path=rasters.CACHE/'smfe-4ppd.tif'
+        smfe_meta=next(item for item in provenance if item.get('source_url')==rasters.SMFE_URL)
+        legacy={'version':1,'rows':data.drop(columns='smfe').to_dict('records'),
+                'attrs':data.attrs,'provenance':[item for item in provenance if item.get('source_url')!=rasters.SMFE_URL]}
+        with tempfile.TemporaryDirectory() as directory:
+            cache=Path(directory)
+            (cache/'samples.json').write_text(json.dumps(legacy))
+            with patch('rasters.CACHE',cache), patch('rasters.download',return_value=(source_path,smfe_meta)) as fetch:
+                upgraded,receipts=rasters.load_sources()
+                fetch.assert_called_once_with(rasters.SMFE_URL,'smfe-4ppd.tif')
+                self.assertTrue(upgraded.equals(data))
+                self.assertEqual(len([r for r in receipts if 'sha256' in r]),10)
+                self.assertTrue(receipts[-1]['reused_v1_samples'])
+                # Subsequent loads must use the completed version-2 cache.
+                again,_=rasters.load_sources()
+                self.assertTrue(again.equals(upgraded))
+                self.assertEqual(fetch.call_count,1)
+
     # Run the generated Streamlit app, confirm automatic loading and absence
     # of upload controls, then exercise a query and Methods-page navigation.
     def test_automatic_app(self):
@@ -145,7 +173,18 @@ class AutomaticSourceTests(unittest.TestCase):
         self.assertEqual(before_ids,at.dataframe[0].value['site_id'].tolist())
         self.assertTrue((at.dataframe[0].value['terrain_features']=='TiO2 + OMAT + exposure').all())
         self.assertEqual(at.session_state['data'].attrs['terrain_comparison']['features'],['tio2','omat','solar_wind_exposure'])
+        # Exercise new controls on real data before checking paired diagnostics.
+        [s for s in at.selectbox if s.label=='Clustering features'][0].set_value('TiO2 + OMAT + exposure + SMFe').run()
+        [s for s in at.selectbox if s.label=='Clustering space'][0].set_value('PCA (2 components)').run()
+        [s for s in at.selectbox if s.label=='Surface layer'][0].set_value('SMFe abundance').run()
+        self.assertFalse(at.exception)
+        self.assertEqual(before_ids,at.dataframe[0].value['site_id'].tolist())
+        self.assertTrue(at.session_state['data'].attrs['terrain_comparison']['use_pca'])
+        self.assertEqual(at.session_state['data'].attrs['terrain_comparison']['groups'],6)
         at.sidebar.radio[0].set_value('Methods & project').run()
+        self.assertTrue(any('PCA: variance' in m.value for m in at.markdown))
+        [s for s in at.selectbox if s.label=='Comparison experiment'][0].set_value('TiO2 + OMAT + exposure + SMFe | PCA (2 components)').run()
+        self.assertFalse(at.exception)
         self.assertTrue(any(m.label=='Adjusted Rand agreement' for m in at.metric))
         self.assertTrue(any('What changes when exposure' in m.value for m in at.markdown))
         # Returning to baseline must restore cached 2D labels, not leave
@@ -225,18 +264,20 @@ class TerrainComparisonTests(unittest.TestCase):
         cls.raw,_=load_sources()
         cls.fitted,cls.silhouette=fit_terrain(cls.raw)
         cls.augmented,_=fit_terrain(cls.raw,include_exposure=True)
+        cls.smfe,_=fit_terrain(cls.raw,include_smfe=True)
+        cls.pca,_=fit_terrain(cls.raw,include_smfe=True,include_exposure=True,use_pca=True)
 
     def test_memberships_and_identical_inputs(self):
         from sklearn.cluster import KMeans
         from sklearn.preprocessing import StandardScaler
         data=self.fitted
         self.assertTrue(data.attrs['terrain_comparison']['gmm_available'])
-        probabilities=data[[f'gmm_p_{i}' for i in range(4)]].to_numpy()
+        probabilities=data[[f'gmm_p_{i}' for i in range(6)]].to_numpy()
         np.testing.assert_allclose(probabilities.sum(axis=1),1.)
         self.assertTrue(np.all((probabilities>=0)&(probabilities<=1)))
         np.testing.assert_array_equal(probabilities.argmax(axis=1).astype(str),data.gmm_cluster)
         # The original K-means solution and balanced formula must remain intact.
-        expected=KMeans(n_clusters=4,random_state=530,n_init=10).fit_predict(StandardScaler().fit_transform(self.raw[['tio2','omat']]))
+        expected=KMeans(n_clusters=6,random_state=530,n_init=10).fit_predict(StandardScaler().fit_transform(self.raw[['tio2','omat']]))
         np.testing.assert_array_equal(expected.astype(str),data.kmeans_cluster)
         np.testing.assert_allclose(data.score,100*(.65*data.tio2.rank(pct=True)+.35*(-data.omat).rank(pct=True)))
 
@@ -253,11 +294,45 @@ class TerrainComparisonTests(unittest.TestCase):
         self.assertEqual(len(report['scaler_scale']),3)
         self.assertEqual(report['exposure_model']['shielded_fraction'],.2)
         self.assertTrue(report['gmm_available'])
-        np.testing.assert_allclose(after[[f'gmm_p_{i}' for i in range(4)]].sum(axis=1),1.)
+        np.testing.assert_allclose(after[[f'gmm_p_{i}' for i in range(6)]].sum(axis=1),1.)
         for priority in ['balanced','tio2','maturity','exposure']:
             plan=dict(DEFAULT,priority=priority)
             self.assertEqual(rank_sites(before,plan).site_id.tolist(),rank_sites(after,plan).site_id.tolist())
         self.assertNotIn('solar_wind_exposure',self.raw.columns)
+
+    def test_smfe_pca_and_six_groups(self):
+        # Real raster observations verify the entire preprocessing contract:
+        # shared rows, six components, unchanged ranks, and reconstructable PCA.
+        from core import rank_sites
+        for data in [self.fitted,self.augmented,self.smfe,self.pca]:
+            report=data.attrs['terrain_comparison']
+            self.assertEqual(report['groups'],6)
+            self.assertEqual(data.kmeans_cluster.nunique(),6)
+            self.assertTrue(report['gmm_available'])
+            self.assertEqual(data.gmm_cluster.nunique(),6)
+            np.testing.assert_array_equal(data.site_id,self.fitted.site_id)
+            np.testing.assert_allclose(data.score,self.fitted.score)
+            self.assertEqual(rank_sites(data,DEFAULT).site_id.tolist(),
+                             rank_sites(self.fitted,DEFAULT).site_id.tolist())
+        report=self.pca.attrs['terrain_comparison']
+        self.assertEqual(report['features'],['tio2','omat','solar_wind_exposure','smfe'])
+        self.assertEqual(report['clustering_dimensions'],2)
+        # Independently refit K-means on exported PC scores to catch accidentally
+        # clustering on original features while merely reporting a PCA setting.
+        from sklearn.cluster import KMeans
+        expected=KMeans(n_clusters=6,random_state=530,n_init=10).fit_predict(self.pca[['pca_1','pca_2']])
+        np.testing.assert_array_equal(expected.astype(str),self.pca.kmeans_cluster)
+        np.testing.assert_allclose(self.pca[[f'gmm_p_{i}' for i in range(6)]].sum(axis=1),1.)
+        self.assertTrue(report['use_pca'])
+        standardized=(self.pca[report['features']].to_numpy()-report['scaler_mean'])/report['scaler_scale']
+        components=np.asarray(report['pca']['components'])
+        centered=standardized-report['pca']['mean']
+        scores=centered@components.T
+        np.testing.assert_allclose(scores[:,:2],self.pca[['pca_1','pca_2']],atol=1e-10)
+        np.testing.assert_allclose(scores@components,centered,atol=1e-10)
+        self.assertAlmostEqual(sum(report['pca']['explained_variance_ratio']),1.)
+        self.assertAlmostEqual(self.fitted.attrs['terrain_comparison']['pca']['retained_variance_2pc'],1.)
+        self.assertIn('smfe',self.smfe.attrs['terrain_comparison']['features'])
 
     def test_switching_does_not_rerank_or_mutate(self):
         from core import select_terrain,rank_sites
@@ -288,178 +363,6 @@ class TerrainComparisonTests(unittest.TestCase):
 # MoonScout.ipynb cell 19
 # export: test_app.py
 
-# api_response creates only an API-protocol fixture containing query settings;
-# no scientific measurements are generated by these tests.
-def api_response(plan=None, supported=True, status='completed', content=None):
-    payload = {'status': status, 'output': [{'type': 'message', 'content': content or [
-        {'type': 'output_text', 'text': json.dumps({'supported': supported, 'plan': plan or DEFAULT})}]}]}
-    return SimpleNamespace(status_code=200, json=lambda: payload)
-
-# Exercise the API boundary without spending API credits or requiring credentials.
-class OpenAIPlannerTests(unittest.TestCase):
-    # Check follow-up state and the exact structured request sent to OpenAI.
-    def test_followup_and_request(self):
-        first = dict(DEFAULT, priority='tio2')
-        with patch('core.requests.post', side_effect=[api_response(first), api_response(dict(first, top_n=5))]) as post:
-            p = plan_query('highest TiO2', DEFAULT, api_key='test-only-key')
-            result = plan_query('top 5', p, api_key='test-only-key')
-        self.assertEqual(result, dict(first, top_n=5))
-        self.assertEqual(DEFAULT['priority'], 'balanced')
-        args, kwargs = post.call_args
-        self.assertEqual(args[0], 'https://api.openai.com/v1/responses')
-        self.assertFalse(kwargs['json']['store'])
-        self.assertEqual(kwargs['json']['text']['format']['schema'], PLAN_SCHEMA)
-        self.assertIn(json.dumps(first), kwargs['json']['input'][0]['content'])
-
-    # Missing credentials and empty questions must fail before any network call.
-    def test_missing_key_and_empty_question(self):
-        with patch.dict('os.environ', {}, clear=True), patch('core.OPENAI_API_KEY', ''), patch('core.requests.post') as post:
-            for question in ['top 5', ' ']:
-                with self.assertRaises(ValueError):
-                    plan_query(question, DEFAULT)
-            post.assert_not_called()
-
-    # Unsupported requests, invalid bounds, refusals, and truncation cannot become plans.
-    def test_invalid_model_results(self):
-        responses = [api_response(supported=False), api_response(dict(DEFAULT, west=200)),
-                     api_response(status='incomplete'),
-                     api_response(content=[{'type': 'refusal', 'refusal': 'declined'}]),
-                     api_response(content=[{'type': 'output_text', 'text': 'not JSON'}])]
-        for response in responses:
-            with self.subTest(response=response), patch('core.requests.post', return_value=response):
-                with self.assertRaises(ValueError):
-                    plan_query('question', DEFAULT, api_key='test-only-key')
-
-    # Provider errors and timeouts produce bounded errors, never a parser fallback.
-    def test_provider_failures(self):
-        for code in [401, 403, 429, 500]:
-            with self.subTest(code=code), patch('core.requests.post', return_value=SimpleNamespace(status_code=code)):
-                with self.assertRaises(ValueError):
-                    plan_query('top 5', DEFAULT, api_key='test-only-key')
-        with patch('core.requests.post', side_effect=requests.Timeout('private details')):
-            with self.assertRaisesRegex(ValueError, 'could not be reached') as caught:
-                plan_query('top 5', DEFAULT, api_key='test-only-key')
-            self.assertNotIn('private details', str(caught.exception))
-
-# AutomaticSourceTests groups query, real-data cache, UI, and failure-path
-# checks. Source-loading tests may download publisher data on a cold cache.
-class AutomaticSourceTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        # Only the integration suite needs the native raster stack and Streamlit.
-        global load_sources, AppTest
-        from rasters import load_sources
-        from streamlit.testing.v1 import AppTest
-
-    
-    # Check real sample counts, TiO2 bounds, all nine download receipts, and
-    # equality of the sample table returned by a second cached load.
-    def test_sources_and_cache(self):
-        data,provenance=load_sources()
-        self.assertGreater(len(data),100)
-        self.assertTrue(data.tio2.between(0,15).all())
-        self.assertEqual(len([p for p in provenance if 'sha256' in p]),9)
-        again,_=load_sources()
-        self.assertTrue(data.equals(again))
-    
-    # Run the generated Streamlit app, confirm automatic loading and absence
-    # of upload controls, then exercise a query and Methods-page navigation.
-    def test_automatic_app(self):
-        at=AppTest.from_file(str(__import__('pathlib').Path(__file__).with_name('app.py')),default_timeout=120).run()
-        self.assertFalse(at.exception)
-        self.assertIsNotNone(at.session_state['data'])
-        self.assertEqual(at.sidebar.radio[0].options,['Explore','Methods & project'])
-        self.assertEqual(len(at.get('file_uploader')),0)
-        at.secrets['OPENAI_API_KEY'] = 'test-only-key'
-        at.run()
-        self.assertEqual(len(at.toggle), 0)
-        at.text_area[0].set_value('highest TiO2')
-        [b for b in at.button if b.label=='Find candidates'][0].click()
-        with patch('core.requests.post', return_value=api_response(dict(DEFAULT, priority='tio2'))):
-            at.run()
-        self.assertFalse(at.exception)
-        self.assertEqual(at.session_state['plan']['priority'],'tio2')
-        # Exercise modeled exposure end-to-end using the real loaded samples.
-        at.text_area[0].set_value('highest solar wind exposure')
-        [b for b in at.button if b.label=='Find candidates'][0].click()
-        with patch('core.requests.post', return_value=api_response(dict(DEFAULT, priority='exposure'))):
-            at.run()
-        [s for s in at.selectbox if s.label=='Surface layer'][0].set_value('Modeled solar-wind exposure').run()
-        self.assertFalse(at.exception)
-        data = at.session_state['data']
-        self.assertTrue(data.solar_wind_exposure.between(0,1).all())
-        ranked = rank_sites(data, at.session_state['plan'])
-        self.assertTrue(ranked.solar_wind_exposure.is_monotonic_decreasing)
-        self.assertIn('solar_wind_exposure', at.dataframe[0].value.columns)
-        self.assertTrue(any('not measured flux' in item[1] for item in at.session_state['history']))
-        previous = dict(at.session_state['plan'])
-        history = list(at.session_state['history'])
-        at.text_area[0].set_value('top 5')
-        [b for b in at.button if b.label=='Find candidates'][0].click()
-        with patch('core.requests.post', side_effect=requests.Timeout()):
-            at.run()
-        self.assertEqual(at.session_state['plan'], previous)
-        self.assertEqual(at.session_state['history'], history)
-        self.assertTrue(any('previous results retained' in e.value for e in at.error))
-        at.sidebar.radio[0].set_value('Methods & project').run()
-        self.assertFalse(at.exception)
-    
-    # Simulate a source-loader connection error, then verify an error and retry
-    # control appear with no loaded samples or substitute result table.
-    def test_source_failure_has_no_fallback(self):
-        with patch('rasters.load_sources',side_effect=ConnectionError('Source unavailable')):
-            at=AppTest.from_file(str(__import__('pathlib').Path(__file__).with_name('app.py')),default_timeout=120).run()
-        self.assertFalse(at.exception)
-        self.assertIsNone(at.session_state['data'])
-        self.assertEqual(len(at.dataframe),0)
-        self.assertTrue(any('could not be loaded' in e.value for e in at.error))
-        self.assertTrue(any(b.label=='Retry source loading' for b in at.button))
-
-class GeographicExposureTests(unittest.TestCase):
-    # Known physical limits: no shielding recovers cos(latitude), and the
-    # equatorial farside stays at one; poles receive zero in this zero-tilt model.
-    def test_reference_values_and_symmetry(self):
-        self.assertAlmostEqual(float(geographic_exposure(0, 0)), 1-np.sin(.2*np.pi))
-        self.assertAlmostEqual(float(geographic_exposure(0, 180)), 1.)
-        self.assertAlmostEqual(float(geographic_exposure(60, 180)), .5)
-        np.testing.assert_allclose(geographic_exposure([90,-90], 30), 0, atol=1e-15)
-        np.testing.assert_allclose(geographic_exposure([0,30,60], [0,45,180], 0),
-                                   np.cos(np.deg2rad([0,30,60])))
-        np.testing.assert_allclose(geographic_exposure(20, [-180,-90,-30,0,30,90,180]),
-                                   geographic_exposure(-20, [180,90,30,0,-30,-90,-180]))
-        np.testing.assert_allclose(geographic_exposure(0, [-180,-30,0]),
-                                   geographic_exposure(0, [180,330,360]))
-
-    # Independent quadrature checks the piecewise equation against integration
-    # of illuminated projected area, excluding the assumed magnetotail arc.
-    def test_against_orbital_integration(self):
-        phase = np.linspace(-np.pi, np.pi, 200000, endpoint=False) + np.pi/200000
-        for f in [0., .14, .20, .27, .5]:
-            for lon in [0., 54., 90., 126., 180., -75.]:
-                incidence = np.maximum(0., np.cos(np.deg2rad(lon)-phase))
-                allowed = np.abs(phase) >= f*np.pi
-                expected = np.sum(incidence*allowed) * (2*np.pi/len(phase)) / 2
-                self.assertAlmostEqual(float(geographic_exposure(0,lon,f)), expected, places=7)
-
-    # Check branch joins, range, and monotonic shielding across the globe.
-    def test_continuity_range_and_shielding(self):
-        for boundary in [54.,126.]:
-            self.assertAlmostEqual(float(geographic_exposure(0,boundary-1e-7)),
-                                   float(geographic_exposure(0,boundary+1e-7)), places=8)
-        lat,lon = np.meshgrid(np.linspace(-90,90,181),np.linspace(-180,180,361))
-        values = geographic_exposure(lat,lon)
-        self.assertTrue(np.all((values >= 0) & (values <= 1)))
-        self.assertTrue(np.all(geographic_exposure(lat,lon,.27) <= geographic_exposure(lat,lon,.14)+1e-14))
-
-    def test_invalid_inputs(self):
-        for lat,lon,f in [(91,0,.2),(0,np.nan,.2),(np.inf,0,.2),(0,0,-.1),
-                          (0,0,.51),(0,0,np.nan),(0,0,True)]:
-            with self.subTest(lat=lat,lon=lon,f=f), self.assertRaises(ValueError):
-                geographic_exposure(lat,lon,f)
-
-    # Exercise the exposure planner contract without an API call; retrieval is
-    # checked against real samples by AutomaticSourceTests above.
-    def test_exposure_query_plan(self):
-        expected = dict(DEFAULT, priority='exposure')
-        with patch('core.requests.post', return_value=api_response(expected)):
-            self.assertEqual(plan_query('highest solar wind exposure',DEFAULT,api_key='test-only-key'),expected)
+# Run unittest only when the generated test_app.py is executed directly;
+# importing it for test discovery does not start another test run.
+if __name__=='__main__': unittest.main()
